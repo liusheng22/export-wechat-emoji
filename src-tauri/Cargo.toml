@@ -1,0 +1,20 @@
+[package]
+name = "微信表情包导出助手"
+version = "0.0.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "1", features = [] }
+
+[dependencies]
+tauri = { version = "1", features = [ "dialog-message", "fs-remove-file", "http-all", "shell-execute", "fs-copy-file", "fs-read-dir", "fs-exists", "fs-read-file", "fs-create-dir", "path-all", "fs-write-file"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]

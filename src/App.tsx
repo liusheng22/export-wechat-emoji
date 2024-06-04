@@ -237,15 +237,18 @@ function App() {
       </>
 
       {imgList.length ? (
-        <h1>表情包预览</h1>
+        <h1>
+          {imgList.length}个表情包预览
+          {imgList.length > 30 ? `（仅显示前30个）` : ''}
+        </h1>
       ) : (
         selectedTargetDir && <h1>啥也没有</h1>
       )}
       <div className="img-list">
         <ImageList cols={5}>
-          {imgList.slice(0, 20).map((item) => (
+          {imgList.slice(0, 30).map((item) => (
             <ImageListItem key={item.src}>
-              <img srcSet={item.src} src={item.src} loading="lazy" />
+              <img src={item.src} loading="lazy" />
             </ImageListItem>
           ))}
         </ImageList>

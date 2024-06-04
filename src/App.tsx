@@ -14,6 +14,7 @@ import { getClient, ResponseType } from '@tauri-apps/api/http'
 import { homeDir, downloadDir } from '@tauri-apps/api/path'
 import { Command } from '@tauri-apps/api/shell'
 import { useState } from 'react'
+import { PhotoProvider, PhotoView } from 'react-photo-view'
 import xmlJs from 'xml-js'
 import { sleep } from './utils/timer'
 import { getUrlParam } from './utils/url'
@@ -33,8 +34,16 @@ function App() {
   // weChat 目录路径
   const weChatDirPath =
     'Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9'
-  // 图片预览列表
-  const [imgList, setImgList] = useState<Array<IMaybeUrl>>([])
+  // 下载图片的列表
+  const [downloadImgList, setDownloadImgList] = useState<Array<IMaybeUrl>>([])
+  // 页面展示图片的列表
+  const [showImgList, setShowImgList] = useState<Array<IMaybeUrl>>([])
+  // 下载的子目录集合
+  const [downloadSubDirs, setDownloadSubDirs] = useState<Array<number>>([])
+  // 导出进度数
+  const [exportProgress, setExportProgress] = useState(0)
+  // 是否正在导出
+  const [isExporting, setIsExporting] = useState(false)
   // home 目录路径
   const [homeDirPath, setHomeDirPath] = useState('')
   // download 目录路径
@@ -142,8 +151,8 @@ function App() {
           src: item._text
         }
       })
-      .reverse()
-    setImgList(urls.reverse())
+    setShowImgList(urls)
+    setDownloadImgList(urls.slice().reverse())
   }
 
   async function fetchImg(src: string): Promise<[boolean, ArrayBuffer]> {
@@ -164,6 +173,8 @@ function App() {
   }
 
   async function parseWeChatArchive() {
+    setIsExporting(true)
+    setExportProgress(0)
     // 保存图片到本地
     await createDir(customEmotionsDirName, {
       dir: BaseDirectory.Download,
@@ -171,31 +182,54 @@ function App() {
     })
 
     // 获取 img 的 Uint8Array
-    for (let i = 0; i < imgList.reverse().length; i++) {
-      // TODO: 限制下载数量 测试
-      // if (i > 2) {
+    for (let i = 0; i < downloadImgList.length; i++) {
+      // TODO: 限制下载数量 测试用
+      // if (i > 10) {
       //   break
       // }
 
-      const { src } = imgList[i]
+      const { src } = downloadImgList[i]
       const [isOk, imgBuffer] = await fetchImg(src)
+      setExportProgress(i + 1)
       if (isOk) {
-        await handleExport(src, imgBuffer)
+        await handleExport(src, i, imgBuffer)
         await sleep(100)
       }
     }
     // await message('完成咯～')
     await sleep(1500)
+    setIsExporting(false)
+    setExportProgress(0)
     openDir()
   }
 
-  async function handleExport(src: string, imgBuffer: ArrayBuffer) {
+  const handleDownload = async (
+    dirPath: string,
+    src: string,
+    imgBuffer: ArrayBuffer
+  ) => {
     const fileKey = getUrlParam(src, 'm')
     return await writeBinaryFile(
-      `${customEmotionsDirName}/${fileKey}.gif`,
+      `${dirPath}/${fileKey}.gif`,
       new Uint8Array(imgBuffer),
       { dir: BaseDirectory.Download }
     )
+  }
+
+  // 导出图片 - 50 个为一个目录
+  async function handleExport(src: string, i: number, imgBuffer: ArrayBuffer) {
+    const subDirNumber = Math.floor(i / 50)
+    const subDirPath = `${customEmotionsDirName}/${subDirNumber * 50 + 1}_${(subDirNumber + 1) * 50}_组`
+    if (downloadSubDirs.includes(subDirNumber)) {
+      await handleDownload(subDirPath, src, imgBuffer)
+    } else {
+      setDownloadSubDirs([...downloadSubDirs, subDirNumber])
+      await createDir(subDirPath, {
+        dir: BaseDirectory.Download,
+        recursive: true
+      })
+      await handleDownload(subDirPath, src, imgBuffer)
+    }
   }
 
   // 打开下载目录
@@ -228,29 +262,46 @@ function App() {
           <div>
             <div>我也不晓得哪个目录下的表情包是你的，自己选一个然后导出吧</div>
             {!!selectedTargetDir && (
-              <button onClick={parseWeChatArchive}>
-                导出该微信目录下的表情包
-              </button>
+              <>
+                {isExporting ? (
+                  <span>正在导出，请稍后...</span>
+                ) : (
+                  <button onClick={parseWeChatArchive}>
+                    导出该微信目录下的表情包
+                  </button>
+                )}
+                {exportProgress > 0 && exportProgress && (
+                  <span className="ml-20">
+                    导出进度：{exportProgress}/{showImgList.length}
+                  </span>
+                )}
+              </>
             )}
           </div>
         )}
       </>
 
-      {imgList.length ? (
+      {showImgList.length ? (
         <h1>
-          {imgList.length}个表情包预览
-          {imgList.length > 30 ? `（仅显示前30个）` : ''}
+          {showImgList.length}个表情包预览
+          {showImgList.length > 30 ? `（仅显示前30个）` : ''}
         </h1>
       ) : (
         selectedTargetDir && <h1>啥也没有</h1>
       )}
       <div className="img-list">
         <ImageList cols={5}>
-          {imgList.slice(0, 30).map((item) => (
-            <ImageListItem key={item.src}>
-              <img src={item.src} loading="lazy" />
-            </ImageListItem>
-          ))}
+          <PhotoProvider>
+            {showImgList.slice(0, 30).map((item, index) => (
+              <ImageListItem key={item.src}>
+                <div className="img-preview">
+                  <PhotoView key={index} src={item.src}>
+                    <img src={item.src} loading="lazy" alt="" />
+                  </PhotoView>
+                </div>
+              </ImageListItem>
+            ))}
+          </PhotoProvider>
         </ImageList>
       </div>
     </div>

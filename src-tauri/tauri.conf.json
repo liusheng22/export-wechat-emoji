@@ -7,7 +7,7 @@
     "distDir": "../dist"
   },
   "package": {
-    "productName": "微信表情包导出助手",
+    "productName": "导出微信表情包",
     "version": "0.0.1"
   },
   "tauri": {
@@ -19,7 +19,7 @@
       "http": {
         "all": true,
         "request": true,
-        "scope": ["https://*", "http://*", "http://wxapp.tc.qq.com/*"]
+        "scope": ["https://*", "http://*"]
       },
       "dialog": {
         "message": true
@@ -52,7 +52,7 @@
     },
     "windows": [
       {
-        "title": "微信表情包导出助手",
+        "title": "导出微信表情包",
         "width": 800,
         "height": 600
       }
@@ -63,9 +63,9 @@
     "bundle": {
       "active": true,
       "targets": "all",
-      "identifier": "com.sheng.liu",
+      "identifier": "cn.laijiayang.export-wechat-emoji",
       "macOS": {
-        "exceptionDomain": "wxapp.tc.qq.com"
+        "exceptionDomain": "wxapp.tc.qq.com,vweixinf.tc.qq.com"
       },
       "icon": [
         "icons/32x32.png",

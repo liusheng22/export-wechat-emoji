@@ -4178,8 +4178,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "微信表情包导出助手"
-version = "0.0.0"
+name = "导出微信表情包"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",

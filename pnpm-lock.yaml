@@ -1,5 +1,9 @@
 lockfileVersion: '6.0'
 
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
 dependencies:
   '@emotion/react':
     specifier: ^11.11.4
@@ -13,18 +17,12 @@ dependencies:
   '@tauri-apps/api':
     specifier: ^1
     version: 1.5.6
-  iconv-lite:
-    specifier: ^0.6.3
-    version: 0.6.3
   react:
     specifier: ^18.2.0
     version: 18.3.1
   react-dom:
     specifier: ^18.2.0
     version: 18.3.1(react@18.3.1)
-  tauri-plugin-upload-api:
-    specifier: github:tauri-apps/tauri-plugin-upload#v1
-    version: github.com/tauri-apps/tauri-plugin-upload/bc69007a912fc0c0c9fe3e3d20f1a9773ae9c86b
   xml-js:
     specifier: ^1.6.11
     version: 1.6.11
@@ -1109,11 +1107,6 @@ packages:
   /@rushstack/eslint-patch@1.10.3:
     resolution: {integrity: sha512-qC/xYId4NMebE6w/V33Fh9gWxLgURiNYgVNObbJl2LZv0GUUItCcCqC5axQSwRaAgaxl2mELq1rMzlswaQ0Zxg==}
     dev: true
-
-  /@tauri-apps/api@1.5.3:
-    resolution: {integrity: sha512-zxnDjHHKjOsrIzZm6nO5Xapb/BxqUq1tc7cGkFXsFkGTsSWgCPH1D8mm0XS9weJY2OaR73I3k3S+b7eSzJDfqA==}
-    engines: {node: '>= 14.6.0', npm: '>= 6.6.0', yarn: '>= 1.19.1'}
-    dev: false
 
   /@tauri-apps/api@1.5.6:
     resolution: {integrity: sha512-LH5ToovAHnDVe5Qa9f/+jW28I6DeMhos8bNDtBOmmnaDpPmJmYLyHdeDblAWWWYc7KKRDg9/66vMuKyq0WIeFA==}
@@ -2748,13 +2741,6 @@ packages:
       react-is: 16.13.1
     dev: false
 
-  /iconv-lite@0.6.3:
-    resolution: {integrity: sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==}
-    engines: {node: '>=0.10.0'}
-    dependencies:
-      safer-buffer: 2.1.2
-    dev: false
-
   /ignore@5.3.1:
     resolution: {integrity: sha512-5Fytz/IraMjqpwfd34ke28PTVMjZjJG2MPn5t7OE4eUCUNf8BAa7b5WUS9/Qvr6mwOQS7Mk6vdsMno5he+T8Xw==}
     engines: {node: '>= 4'}
@@ -3615,10 +3601,6 @@ packages:
       is-regex: 1.1.4
     dev: true
 
-  /safer-buffer@2.1.2:
-    resolution: {integrity: sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==}
-    dev: false
-
   /sax@1.4.1:
     resolution: {integrity: sha512-+aWOz7yVScEGoKNd4PA10LZ8sk0A/z5+nXQG5giUO5rprX9jgYsTdov9qCchZiPIZezbZH+jRut8nPodFAX4Jg==}
     dev: false
@@ -4152,15 +4134,3 @@ packages:
     resolution: {integrity: sha512-9bnSc/HEW2uRy67wc+T8UwauLuPJVn28jb+GtJY16iiKWyvmYJRXVT4UamsAEGQfPohgr2q4Tq0sQbQlxTfi1g==}
     engines: {node: '>=12.20'}
     dev: true
-
-  github.com/tauri-apps/tauri-plugin-upload/bc69007a912fc0c0c9fe3e3d20f1a9773ae9c86b:
-    resolution: {tarball: https://codeload.github.com/tauri-apps/tauri-plugin-upload/tar.gz/bc69007a912fc0c0c9fe3e3d20f1a9773ae9c86b}
-    name: tauri-plugin-upload-api
-    version: 0.0.0
-    dependencies:
-      '@tauri-apps/api': 1.5.3
-    dev: false
-
-settings:
-  autoInstallPeers: true
-  excludeLinksFromLockfile: false

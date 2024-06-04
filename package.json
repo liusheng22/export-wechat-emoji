@@ -1,5 +1,5 @@
 {
-  "name": "wechat-emoji-export",
+  "name": "export-wechat-emoji",
   "type": "module",
   "version": "0.0.1",
   "private": true,
@@ -15,10 +15,8 @@
     "@emotion/styled": "^11.11.5",
     "@mui/material": "^5.15.19",
     "@tauri-apps/api": "^1",
-    "iconv-lite": "^0.6.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "tauri-plugin-upload-api": "github:tauri-apps/tauri-plugin-upload#v1",
     "xml-js": "^1.6.11"
   },
   "devDependencies": {

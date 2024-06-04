@@ -1,8 +1,8 @@
 [package]
-name = "微信表情包导出助手"
-version = "0.0.0"
-description = "A Tauri App"
-authors = ["you"]
+name = "导出微信表情包"
+version = "0.0.1"
+description = "一个在 macOS 上导出微信所有表情包的小工具"
+authors = ["liusheng <black.liusheng@gmail.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

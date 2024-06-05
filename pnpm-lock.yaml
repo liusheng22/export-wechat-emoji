@@ -37,6 +37,9 @@ devDependencies:
   '@tauri-apps/cli':
     specifier: ^1
     version: 1.5.14
+  '@tauri-apps/cli-darwin-arm64':
+    specifier: ^1.5.14
+    version: 1.5.14
   '@types/react':
     specifier: ^18.2.15
     version: 18.3.3
@@ -1123,7 +1126,6 @@ packages:
     os: [darwin]
     requiresBuild: true
     dev: true
-    optional: true
 
   /@tauri-apps/cli-darwin-x64@1.5.14:
     resolution: {integrity: sha512-EXSwN1n5spfG8FoXuyc90ACtmDJXzaZ1gxyENaq9xEpQoo7j/Q1vb6qXxmr6azKr8zmqY4h08ZFbv3exh93xJg==}

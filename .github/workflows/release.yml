@@ -1,4 +1,4 @@
-name: 'publish'
+name: 'release'
 
 # 这里是执行的分支，即只有向release分支推送代码才会执行构建
 on:

@@ -40,6 +40,8 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }} # 密钥，需要提前配置在 Github Secrets中
+          TAURI_KEY_PASSWORD: "ls1793..." # 生成是填入的密码，没有则不填
 
         with:
           tagName: APP-v__VERSION__ # tag的名称，v__VERSION__是指版本号

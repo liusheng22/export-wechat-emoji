@@ -28,7 +28,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: install frontend dependencies
-        run: pnpm install # change this to npm or pnpm depending on which one you use
+        run: |
+          npm install -g pnpm
+          pnpm install # change this to npm or pnpm depending on which one you use
         id: install_frontend_dependencies
       - name: Clear Yarn cache on failure
         if: steps.install_frontend_dependencies=='failure'

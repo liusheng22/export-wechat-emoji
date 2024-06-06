@@ -7,6 +7,7 @@ import {
   createDir,
   readTextFile,
   writeBinaryFile,
+  writeTextFile,
   copyFile,
   BaseDirectory
 } from '@tauri-apps/api/fs'
@@ -16,6 +17,7 @@ import { Command } from '@tauri-apps/api/shell'
 import { useState } from 'react'
 import { PhotoProvider, PhotoView } from 'react-photo-view'
 import xmlJs from 'xml-js'
+import { text } from './consts/text'
 import { sleep } from './utils/timer'
 import { getUrlParam } from './utils/url'
 import './App.css'
@@ -34,6 +36,10 @@ function App() {
   // weChat 目录路径
   const weChatDirPath =
     'Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9'
+  // wxapp 域名
+  const wxappDomain = 'wxapp.tc.qq.com'
+  // vweixinf 域名
+  const vweixinfDomain = 'vweixinf.tc.qq.com'
   // 下载图片的列表
   const [downloadImgList, setDownloadImgList] = useState<Array<IMaybeUrl>>([])
   // 页面展示图片的列表
@@ -42,6 +48,8 @@ function App() {
   const [downloadSubDirs, setDownloadSubDirs] = useState<Array<number>>([])
   // 导出进度数
   const [exportProgress, setExportProgress] = useState(0)
+  // 是否创建表情包存储目录
+  const [hasEmotionsDir, setHasEmotionsDir] = useState(false)
   // 是否正在导出
   const [isExporting, setIsExporting] = useState(false)
   // home 目录路径
@@ -140,18 +148,61 @@ function App() {
       dir: BaseDirectory.Home
     })
 
-    const archiveData = xmlJs.xml2json(plistData, { compact: true, spaces: 4 })
-    const maybeUrls = JSON.parse(archiveData).plist.dict.array.string
+    const archiveDataJson = xmlJs.xml2json(plistData, {
+      compact: true,
+      spaces: 4
+    })
+    const archiveObj = JSON.parse(archiveDataJson) || {}
+    const maybeUrls: Array<IMaybeUrl> = archiveObj?.plist?.dict?.array?.string
     const urls = maybeUrls
       .filter((item: IMaybeUrl) => {
         return String(item._text).match(/http[s]?:\/\/[^\s]+/)
       })
       .map((item: IMaybeUrl) => {
+        let src = item._text
+        /**
+         * 微信有几种域名的表情包
+         * - wxapp.tc.qq.com
+         * - vweixinf.tc.qq.com
+         * - mmbiz.qpic.cn
+         * - snsvideo.c2c.wechat.com - 无法访问了
+         */
+
+        // src 是 http 开头的全部替换为 https
+        if (src.startsWith('http://')) {
+          src = src.replace('http://', 'https://')
+        }
+
+        if (src.includes(wxappDomain)) {
+          src = src.replace(`http://${wxappDomain}`, `https://${wxappDomain}`)
+        }
+        if (src.includes(vweixinfDomain)) {
+          // 判断 src 是否为 https
+          if (src.startsWith('https://')) {
+            src = src.replace(
+              `https://${vweixinfDomain}`,
+              `https://${wxappDomain}`
+            )
+          } else {
+            src = src.replace(
+              `http://${vweixinfDomain}`,
+              `https://${wxappDomain}`
+            )
+          }
+        }
+        if (src.includes('/stodownload?')) {
+          src = src.replace('/stodownload?', '/stodownload.gif?')
+        }
+
         return {
-          src: item._text
+          ...item,
+          src
         }
       })
+
+    // 展示图片的列表
     setShowImgList(urls)
+    // 下载图片的列表
     setDownloadImgList(urls.slice().reverse())
   }
 
@@ -175,11 +226,9 @@ function App() {
   async function parseWeChatArchive() {
     setIsExporting(true)
     setExportProgress(0)
-    // 保存图片到本地
-    await createDir(customEmotionsDirName, {
-      dir: BaseDirectory.Download,
-      recursive: true
-    })
+
+    await createEmotionsDir()
+    await createReadme()
 
     // 获取 img 的 Uint8Array
     for (let i = 0; i < downloadImgList.length; i++) {
@@ -188,7 +237,7 @@ function App() {
       //   break
       // }
 
-      const { src } = downloadImgList[i]
+      const { _text: src } = downloadImgList[i]
       const [isOk, imgBuffer] = await fetchImg(src)
       setExportProgress(i + 1)
       if (isOk) {
@@ -201,6 +250,23 @@ function App() {
     setIsExporting(false)
     setExportProgress(0)
     openDir()
+  }
+
+  // 创建表情包目录
+  const createEmotionsDir = async () => {
+    await createDir(customEmotionsDirName, {
+      dir: BaseDirectory.Download,
+      recursive: true
+    })
+    setHasEmotionsDir(true)
+    return
+  }
+
+  // 创建说明文档
+  const createReadme = async () => {
+    return await writeTextFile(`${customEmotionsDirName}/使用说明.txt`, text, {
+      dir: BaseDirectory.Download
+    })
   }
 
   const handleDownload = async (
@@ -234,15 +300,14 @@ function App() {
 
   // 打开下载目录
   async function openDir() {
-    // const path = `${downloadDirPath}${customEmotionsDirName}`
-    await new Command('open-dir', [downloadDirPath]).execute()
+    const path = `${downloadDirPath}${customEmotionsDirName}`
+    await new Command('open-dir', [path]).execute()
+    // await new Command('open-dir', [downloadDirPath]).execute()
   }
 
   return (
     <div className="container">
-      <button className="ml-20" onClick={getFsPermission}>
-        查找微信表情包
-      </button>
+      <button onClick={getFsPermission}>查找微信表情包</button>
 
       <>
         {targetDirNames.length > 0 && (
@@ -274,6 +339,12 @@ function App() {
                   <span className="ml-20">
                     导出进度：{exportProgress}/{showImgList.length}
                   </span>
+                )}
+
+                {downloadDirPath && customEmotionsDirName && hasEmotionsDir && (
+                  <button className="ml-20" onClick={openDir}>
+                    打开下载目录
+                  </button>
                 )}
               </>
             )}

@@ -1,4 +1,4 @@
-name: 'publish'
+name: release
 
 # 这里是执行的分支，即只有向release分支推送代码才会执行构建
 on:
@@ -28,22 +28,25 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: install frontend dependencies
-        run: yarn install # change this to npm or pnpm depending on which one you use
+        run: |
+          npm install -g pnpm
+          pnpm install # change this to npm or pnpm depending on which one you use
         id: install_frontend_dependencies
       - name: Clear Yarn cache on failure
         if: steps.install_frontend_dependencies=='failure'
         run: |
-          yarn cache clean
-          yarn install
-
+          pnpm store prune
+          pnpm install
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }} # 密钥，需要提前配置在 Github Secrets中
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }} # 生成时填入的密码，没有则不填
 
         with:
-          tagName: APP-v__VERSION__ # tag的名称，v__VERSION__是指版本号
-          releaseName: 'APP v__VERSION__'
-          releaseBody: 'APP v__VERSION__ 发布'
+          tagName: v__VERSION__ # tag的名称: v__VERSION__是指版本号
+          releaseName: 导出微信表情包 v__VERSION__
+          releaseBody: 导出微信表情包APP v__VERSION__ 发布
           releaseDraft: false
           prerelease: false

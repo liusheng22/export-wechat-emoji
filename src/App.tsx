@@ -36,6 +36,10 @@ function App() {
   // weChat 目录路径
   const weChatDirPath =
     'Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9'
+  // wxapp 域名
+  const wxappDomain = 'wxapp.tc.qq.com'
+  // vweixinf 域名
+  const vweixinfDomain = 'vweixinf.tc.qq.com'
   // 下载图片的列表
   const [downloadImgList, setDownloadImgList] = useState<Array<IMaybeUrl>>([])
   // 页面展示图片的列表
@@ -144,18 +148,61 @@ function App() {
       dir: BaseDirectory.Home
     })
 
-    const archiveData = xmlJs.xml2json(plistData, { compact: true, spaces: 4 })
-    const maybeUrls = JSON.parse(archiveData).plist.dict.array.string
+    const archiveDataJson = xmlJs.xml2json(plistData, {
+      compact: true,
+      spaces: 4
+    })
+    const archiveObj = JSON.parse(archiveDataJson) || {}
+    const maybeUrls: Array<IMaybeUrl> = archiveObj?.plist?.dict?.array?.string
     const urls = maybeUrls
       .filter((item: IMaybeUrl) => {
         return String(item._text).match(/http[s]?:\/\/[^\s]+/)
       })
       .map((item: IMaybeUrl) => {
+        let src = item._text
+        /**
+         * 微信有几种域名的表情包
+         * - wxapp.tc.qq.com
+         * - vweixinf.tc.qq.com
+         * - mmbiz.qpic.cn
+         * - snsvideo.c2c.wechat.com - 无法访问了
+         */
+
+        // src 是 http 开头的全部替换为 https
+        if (src.startsWith('http://')) {
+          src = src.replace('http://', 'https://')
+        }
+
+        if (src.includes(wxappDomain)) {
+          src = src.replace(`http://${wxappDomain}`, `https://${wxappDomain}`)
+        }
+        if (src.includes(vweixinfDomain)) {
+          // 判断 src 是否为 https
+          if (src.startsWith('https://')) {
+            src = src.replace(
+              `https://${vweixinfDomain}`,
+              `https://${wxappDomain}`
+            )
+          } else {
+            src = src.replace(
+              `http://${vweixinfDomain}`,
+              `https://${wxappDomain}`
+            )
+          }
+        }
+        if (src.includes('/stodownload?')) {
+          src = src.replace('/stodownload?', '/stodownload.gif?')
+        }
+
         return {
-          src: item._text
+          ...item,
+          src
         }
       })
+
+    // 展示图片的列表
     setShowImgList(urls)
+    // 下载图片的列表
     setDownloadImgList(urls.slice().reverse())
   }
 
@@ -190,7 +237,7 @@ function App() {
       //   break
       // }
 
-      const { src } = downloadImgList[i]
+      const { _text: src } = downloadImgList[i]
       const [isOk, imgBuffer] = await fetchImg(src)
       setExportProgress(i + 1)
       if (isOk) {

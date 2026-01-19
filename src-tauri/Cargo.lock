@@ -4181,6 +4181,7 @@ dependencies = [
 name = "导出微信表情包"
 version = "0.0.2"
 dependencies = [
+ "plist",
  "serde",
  "serde_json",
  "tauri",

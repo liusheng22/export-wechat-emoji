@@ -28,11 +28,6 @@
         "execute": true,
         "scope": [
           {
-            "name": "plutil-file",
-            "cmd": "plutil",
-            "args": ["-convert", "xml1", { "validator": "\\S+" }]
-          },
-          {
             "name": "open-dir",
             "cmd": "open",
             "args": [{ "validator": "\\S+" }]

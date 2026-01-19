@@ -1,22 +1,32 @@
+import Alert from '@mui/material/Alert'
+import Box from '@mui/material/Box'
+import Button from '@mui/material/Button'
+import Container from '@mui/material/Container'
+import FormControl from '@mui/material/FormControl'
 import ImageList from '@mui/material/ImageList'
 import ImageListItem from '@mui/material/ImageListItem'
+import InputLabel from '@mui/material/InputLabel'
+import LinearProgress from '@mui/material/LinearProgress'
+import MenuItem from '@mui/material/MenuItem'
+import Paper from '@mui/material/Paper'
+import Select, { type SelectChangeEvent } from '@mui/material/Select'
+import Stack from '@mui/material/Stack'
+import Typography from '@mui/material/Typography'
 import { message } from '@tauri-apps/api/dialog'
 import {
   readDir,
   exists,
   createDir,
-  readTextFile,
   writeBinaryFile,
   writeTextFile,
-  copyFile,
   BaseDirectory
 } from '@tauri-apps/api/fs'
 import { getClient, ResponseType } from '@tauri-apps/api/http'
-import { homeDir, downloadDir } from '@tauri-apps/api/path'
+import { downloadDir } from '@tauri-apps/api/path'
 import { Command } from '@tauri-apps/api/shell'
+import { invoke } from '@tauri-apps/api/tauri'
 import { useState } from 'react'
 import { PhotoProvider, PhotoView } from 'react-photo-view'
-import xmlJs from 'xml-js'
 import { text } from './consts/text'
 import { sleep } from './utils/timer'
 import { getUrlParam } from './utils/url'
@@ -25,6 +35,7 @@ import './App.css'
 interface IMaybeUrl {
   _text: string
   src: string
+  fallbackIndex?: number
 }
 
 interface ISelectOption {
@@ -52,8 +63,6 @@ function App() {
   const [hasEmotionsDir, setHasEmotionsDir] = useState(false)
   // 是否正在导出
   const [isExporting, setIsExporting] = useState(false)
-  // home 目录路径
-  const [homeDirPath, setHomeDirPath] = useState('')
   // download 目录路径
   const [downloadDirPath, setDownloadDirPath] = useState('')
   // 自定义表情包的目录名 - 用于最终存储
@@ -62,9 +71,53 @@ function App() {
   const [targetDirNames, setTargetDirNames] = useState<Array<ISelectOption>>([])
   // 选择的表情包文件夹
   const [selectedTargetDir, setSelectedTargetDir] = useState('')
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  function getStodownloadCandidates(url: string): Array<string> {
+    // WeChat sticker URLs are often `.../stodownload?...`. Some resources require a correct
+    // suffix (jpg/gif/png/webp) to be served/rendered, so we try multiple variants.
+    const exts = ['gif', 'jpg', 'png', 'webp'] as const
+
+    const hasStodownload = url.includes('/stodownload')
+    if (!hasStodownload) {
+      return [url]
+    }
+
+    const replaceExt = (ext: (typeof exts)[number]) =>
+      url.replace(/\/stodownload(?:\.[a-z0-9]+)?\?/i, `/stodownload.${ext}?`)
+
+    const candidates = [url, ...exts.map(replaceExt)]
+    // De-dupe while preserving order.
+    return Array.from(new Set(candidates))
+  }
+
+  function extFromContentType(contentType: string | undefined): string | null {
+    if (!contentType) {
+      return null
+    }
+    const ct = contentType.toLowerCase()
+    if (ct.includes('image/gif')) {
+      return 'gif'
+    }
+    if (ct.includes('image/png')) {
+      return 'png'
+    }
+    if (ct.includes('image/webp')) {
+      return 'webp'
+    }
+    if (ct.includes('image/jpeg') || ct.includes('image/jpg')) {
+      return 'jpg'
+    }
+    return null
+  }
+
+  function extFromUrl(url: string): string | null {
+    const m = url.match(/\/stodownload\.([a-z0-9]+)\?/i)
+    return m?.[1]?.toLowerCase() || null
+  }
 
   async function getFsPermission() {
-    setHomeDirPath(await homeDir())
+    setLoadError(null)
     setDownloadDirPath(await downloadDir())
 
     // weChat 目录下的文件夹
@@ -108,58 +161,36 @@ function App() {
         }
       })
     )
-
-    // 拷贝 fav.archive 文件到 fav.archive.plist
-    for (let i = 0; i < targetDirs.length; i++) {
-      const targetDirName = targetDirs[i]
-      if (targetDirName) {
-        const stickersPath = `${weChatDirPath}/${targetDirName}/Stickers`
-        const sourcePath = `${stickersPath}/fav.archive`
-        const destinationPath = `${stickersPath}/fav.archive.plist`
-        await copyFile(sourcePath, destinationPath, { dir: BaseDirectory.Home })
-
-        const cmd = new Command('plutil-file', [
-          '-convert',
-          'xml1',
-          `${homeDirPath}/${destinationPath}`
-        ])
-        await cmd.execute()
-      }
-    }
   }
 
-  async function selectChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const dirName = e.target.value
+  async function selectChange(e: SelectChangeEvent<string>) {
+    const dirName = e.target.value || ''
 
     setCustomEmotionsDirName(`微信表情包_导出_${dirName}`)
     setSelectedTargetDir(dirName)
+    setLoadError(null)
 
     const stickersPath = `${weChatDirPath}/${dirName}/Stickers`
-    const destinationPath = `${stickersPath}/fav.archive.plist`
+    const favArchivePath = `${stickersPath}/fav.archive`
 
-    const cmd = new Command('plutil-file', [
-      '-convert',
-      'xml1',
-      `${homeDirPath}/${destinationPath}`
-    ])
-    await cmd.execute()
-
-    const plistData = await readTextFile(destinationPath, {
-      dir: BaseDirectory.Home
-    })
-
-    const archiveDataJson = xmlJs.xml2json(plistData, {
-      compact: true,
-      spaces: 4
-    })
-    const archiveObj = JSON.parse(archiveDataJson) || {}
-    const maybeUrls: Array<IMaybeUrl> = archiveObj?.plist?.dict?.array?.string
-    const urls = maybeUrls
-      .filter((item: IMaybeUrl) => {
-        return String(item._text).match(/http[s]?:\/\/[^\s]+/)
+    let rawUrls: Array<string> = []
+    try {
+      rawUrls = await invoke<Array<string>>('extract_fav_urls', {
+        favArchivePath
       })
-      .map((item: IMaybeUrl) => {
-        let src = item._text
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setLoadError(msg || '解析 fav.archive 失败')
+      setShowImgList([])
+      setDownloadImgList([])
+      return
+    }
+    const urls = rawUrls
+      .filter((url) => {
+        return String(url).match(/http[s]?:\/\/[^\s]+/)
+      })
+      .map((url) => {
+        let src = url
         /**
          * 微信有几种域名的表情包
          * - wxapp.tc.qq.com
@@ -190,13 +221,11 @@ function App() {
             )
           }
         }
-        if (src.includes('/stodownload?')) {
-          src = src.replace('/stodownload?', '/stodownload.gif?')
-        }
 
         return {
-          ...item,
-          src
+          _text: src,
+          src,
+          fallbackIndex: 0
         }
       })
 
@@ -206,21 +235,34 @@ function App() {
     setDownloadImgList(urls.slice().reverse())
   }
 
-  async function fetchImg(src: string): Promise<[boolean, ArrayBuffer]> {
+  async function fetchImg(
+    src: string
+  ): Promise<
+    | { ok: true; buffer: ArrayBuffer; usedUrl: string; contentType?: string }
+    | { ok: false; error: unknown }
+  > {
     const client = await getClient()
-    return new Promise((resolve) => {
-      client
-        .get(src, {
-          responseType: ResponseType.Binary
-        })
-        .then((res) => {
-          const buffer = res.data as ArrayBuffer
-          return resolve([true, buffer])
-        })
-        .catch((err) => {
-          return resolve([false, err])
-        })
-    })
+    const candidates = getStodownloadCandidates(src)
+
+    for (const url of candidates) {
+      try {
+        const res = await client.get(url, { responseType: ResponseType.Binary })
+        const buffer = res.data as ArrayBuffer
+        // Tauri v1 returns `headers` as a Record<string, string>.
+        const contentType =
+          (res as unknown as { headers?: Record<string, string> }).headers?.[
+            'content-type'
+          ] ||
+          (res as unknown as { headers?: Record<string, string> }).headers?.[
+            'Content-Type'
+          ]
+        return { ok: true, buffer, usedUrl: url, contentType }
+      } catch (err) {
+        // Try next candidate.
+      }
+    }
+
+    return { ok: false, error: new Error('download failed for all candidates') }
   }
 
   async function parseWeChatArchive() {
@@ -238,10 +280,14 @@ function App() {
       // }
 
       const { _text: src } = downloadImgList[i]
-      const [isOk, imgBuffer] = await fetchImg(src)
+      const result = await fetchImg(src)
       setExportProgress(i + 1)
-      if (isOk) {
-        await handleExport(src, i, imgBuffer)
+      if (result.ok) {
+        const ext =
+          extFromContentType(result.contentType) ||
+          extFromUrl(result.usedUrl) ||
+          'gif'
+        await handleExport(result.usedUrl, i, result.buffer, ext)
         await sleep(100)
       }
     }
@@ -271,30 +317,36 @@ function App() {
 
   const handleDownload = async (
     dirPath: string,
-    src: string,
-    imgBuffer: ArrayBuffer
+    usedUrl: string,
+    imgBuffer: ArrayBuffer,
+    ext: string
   ) => {
-    const fileKey = getUrlParam(src, 'm')
+    const fileKey = getUrlParam(usedUrl, 'm')
     return await writeBinaryFile(
-      `${dirPath}/${fileKey}.gif`,
+      `${dirPath}/${fileKey}.${ext}`,
       new Uint8Array(imgBuffer),
       { dir: BaseDirectory.Download }
     )
   }
 
   // 导出图片 - 50 个为一个目录
-  async function handleExport(src: string, i: number, imgBuffer: ArrayBuffer) {
+  async function handleExport(
+    usedUrl: string,
+    i: number,
+    imgBuffer: ArrayBuffer,
+    ext: string
+  ) {
     const subDirNumber = Math.floor(i / 50)
     const subDirPath = `${customEmotionsDirName}/${subDirNumber * 50 + 1}_${(subDirNumber + 1) * 50}_组`
     if (downloadSubDirs.includes(subDirNumber)) {
-      await handleDownload(subDirPath, src, imgBuffer)
+      await handleDownload(subDirPath, usedUrl, imgBuffer, ext)
     } else {
       setDownloadSubDirs([...downloadSubDirs, subDirNumber])
       await createDir(subDirPath, {
         dir: BaseDirectory.Download,
         recursive: true
       })
-      await handleDownload(subDirPath, src, imgBuffer)
+      await handleDownload(subDirPath, usedUrl, imgBuffer, ext)
     }
   }
 
@@ -306,76 +358,159 @@ function App() {
   }
 
   return (
-    <div className="container">
-      <button onClick={getFsPermission}>查找微信表情包</button>
+    <Container maxWidth="md" sx={{ py: 4 }}>
+      <Stack spacing={2.5} alignItems="stretch">
+        <Typography variant="h5" align="center" sx={{ fontWeight: 700 }}>
+          导出微信表情包
+        </Typography>
 
-      <>
-        {targetDirNames.length > 0 && (
-          <div className="mt-20">
-            <label>选择目标文件夹:</label>
-            <select value={selectedTargetDir} onChange={selectChange}>
-              {targetDirNames.map((item, index) => (
-                <option key={index} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
+        <Paper variant="outlined" sx={{ p: 2.5 }}>
+          <Stack spacing={2}>
+            <Button
+              size="large"
+              variant="contained"
+              onClick={getFsPermission}
+              disabled={isExporting}
+            >
+              查找微信表情包
+            </Button>
 
-        {targetDirNames.length > 0 && (
-          <div>
-            <div>我也不晓得哪个目录下的表情包是你的，自己选一个然后导出吧</div>
-            {!!selectedTargetDir && (
-              <>
-                {isExporting ? (
-                  <span>正在导出，请稍后...</span>
-                ) : (
-                  <button onClick={parseWeChatArchive}>
-                    导出该微信目录下的表情包
-                  </button>
-                )}
-                {exportProgress > 0 && exportProgress && (
-                  <span className="ml-20">
-                    导出进度：{exportProgress}/{showImgList.length}
-                  </span>
-                )}
+            {targetDirNames.length > 0 && (
+              <Stack spacing={1.5}>
+                <FormControl fullWidth size="small">
+                  <InputLabel id="target-dir-label">选择目标文件夹</InputLabel>
+                  <Select
+                    labelId="target-dir-label"
+                    label="选择目标文件夹"
+                    value={selectedTargetDir}
+                    onChange={selectChange}
+                    disabled={isExporting}
+                  >
+                    {targetDirNames.map((item) => (
+                      <MenuItem
+                        key={item.value || '__empty__'}
+                        value={item.value}
+                      >
+                        {item.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
 
-                {downloadDirPath && customEmotionsDirName && hasEmotionsDir && (
-                  <button className="ml-20" onClick={openDir}>
+                <Alert severity="info">
+                  我也不晓得哪个目录下的表情包是你的，自己选一个然后导出吧
+                </Alert>
+
+                {loadError && <Alert severity="error">{loadError}</Alert>}
+
+                <Stack direction="row" spacing={1.5} justifyContent="center">
+                  <Button
+                    variant="outlined"
+                    onClick={parseWeChatArchive}
+                    disabled={
+                      !selectedTargetDir ||
+                      isExporting ||
+                      !downloadImgList.length
+                    }
+                  >
+                    导出
+                  </Button>
+                  <Button
+                    variant="text"
+                    onClick={openDir}
+                    disabled={
+                      !downloadDirPath ||
+                      !customEmotionsDirName ||
+                      !hasEmotionsDir ||
+                      isExporting
+                    }
+                  >
                     打开下载目录
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-        )}
-      </>
+                  </Button>
+                </Stack>
 
-      {showImgList.length ? (
-        <h1>
-          {showImgList.length}个表情包预览
-          {showImgList.length > 30 ? `（仅显示前30个）` : ''}
-        </h1>
-      ) : (
-        selectedTargetDir && <h1>啥也没有</h1>
-      )}
-      <div className="img-list">
-        <ImageList cols={5}>
-          <PhotoProvider>
-            {showImgList.slice(0, 30).map((item, index) => (
-              <ImageListItem key={item.src}>
-                <div className="img-preview">
-                  <PhotoView key={index} src={item.src}>
-                    <img src={item.src} loading="lazy" alt="" />
-                  </PhotoView>
-                </div>
-              </ImageListItem>
-            ))}
-          </PhotoProvider>
-        </ImageList>
-      </div>
-    </div>
+                {(isExporting || exportProgress > 0) && (
+                  <Box>
+                    <Typography variant="body2" sx={{ mb: 0.75 }}>
+                      导出进度：{exportProgress}/{downloadImgList.length}
+                    </Typography>
+                    <LinearProgress
+                      variant="determinate"
+                      value={
+                        downloadImgList.length
+                          ? (exportProgress / downloadImgList.length) * 100
+                          : 0
+                      }
+                    />
+                  </Box>
+                )}
+              </Stack>
+            )}
+          </Stack>
+        </Paper>
+
+        <Paper variant="outlined" sx={{ p: 2.5 }}>
+          <Stack spacing={1.5}>
+            {showImgList.length ? (
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                {showImgList.length} 个表情包预览
+                {showImgList.length > 30 ? `（仅显示前 30 个）` : ''}
+              </Typography>
+            ) : (
+              <Typography variant="body1" color="text.secondary">
+                {selectedTargetDir
+                  ? '啥也没有'
+                  : '先点击「查找微信表情包」，再选择目标文件夹'}
+              </Typography>
+            )}
+
+            {!!showImgList.length && (
+              <Box className="img-list">
+                <ImageList cols={5} gap={8}>
+                  <PhotoProvider>
+                    {showImgList.slice(0, 30).map((item, index) => (
+                      <ImageListItem key={item.src}>
+                        <div className="img-preview">
+                          <PhotoView key={index} src={item.src}>
+                            <img
+                              src={item.src}
+                              loading="lazy"
+                              alt=""
+                              onError={() => {
+                                const candidates = getStodownloadCandidates(
+                                  item._text
+                                )
+                                const nextIndex = (item.fallbackIndex ?? 0) + 1
+                                if (nextIndex >= candidates.length) {
+                                  return
+                                }
+
+                                setShowImgList((prev) =>
+                                  prev.map((p) => {
+                                    if (p._text !== item._text) {
+                                      return p
+                                    }
+                                    return {
+                                      ...p,
+                                      src: candidates[nextIndex],
+                                      fallbackIndex: nextIndex
+                                    }
+                                  })
+                                )
+                              }}
+                            />
+                          </PhotoView>
+                        </div>
+                      </ImageListItem>
+                    ))}
+                  </PhotoProvider>
+                </ImageList>
+              </Box>
+            )}
+          </Stack>
+        </Paper>
+      </Stack>
+    </Container>
   )
 }
 

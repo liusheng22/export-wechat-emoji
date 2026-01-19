@@ -1,13 +1,17 @@
 {
   "name": "export-wechat-emoji",
   "type": "module",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "packageManager": "pnpm@9.15.1+sha1.abc117858086cb10ecb54828d180b035cb6c8fdd",
+  "description": "在 macOS 系统上导出微信收藏的表情包（Tauri + React + Rust）",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "tauri-build": "tauri build",
     "tauri": "tauri"
   },
@@ -18,8 +22,7 @@
     "@tauri-apps/api": "^1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-photo-view": "^1.2.4",
-    "xml-js": "^1.6.11"
+    "react-photo-view": "^1.2.4"
   },
   "devDependencies": {
     "@llius/eslint-config": "^1.0.4",

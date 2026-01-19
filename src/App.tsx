@@ -25,7 +25,7 @@ import { getClient, ResponseType } from '@tauri-apps/api/http'
 import { downloadDir } from '@tauri-apps/api/path'
 import { Command } from '@tauri-apps/api/shell'
 import { invoke } from '@tauri-apps/api/tauri'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { PhotoProvider, PhotoView } from 'react-photo-view'
 import { text } from './consts/text'
 import { sleep } from './utils/timer'
@@ -72,6 +72,8 @@ function App() {
   // 选择的表情包文件夹
   const [selectedTargetDir, setSelectedTargetDir] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
+  const cancelExportRef = useRef(false)
+  const [cancelRequested, setCancelRequested] = useState(false)
 
   function getStodownloadCandidates(url: string): Array<string> {
     // WeChat sticker URLs are often `.../stodownload?...`. Some resources require a correct
@@ -268,34 +270,57 @@ function App() {
   async function parseWeChatArchive() {
     setIsExporting(true)
     setExportProgress(0)
+    setCancelRequested(false)
+    cancelExportRef.current = false
 
     await createEmotionsDir()
     await createReadme()
 
-    // 获取 img 的 Uint8Array
-    for (let i = 0; i < downloadImgList.length; i++) {
-      // TODO: 限制下载数量 测试用
-      // if (i > 10) {
-      //   break
-      // }
+    try {
+      // 获取 img 的 Uint8Array
+      for (let i = 0; i < downloadImgList.length; i++) {
+        if (cancelExportRef.current) {
+          break
+        }
+        // TODO: 限制下载数量 测试用
+        // if (i > 10) {
+        //   break
+        // }
 
-      const { _text: src } = downloadImgList[i]
-      const result = await fetchImg(src)
-      setExportProgress(i + 1)
-      if (result.ok) {
-        const ext =
-          extFromContentType(result.contentType) ||
-          extFromUrl(result.usedUrl) ||
-          'gif'
-        await handleExport(result.usedUrl, i, result.buffer, ext)
-        await sleep(100)
+        const { _text: src } = downloadImgList[i]
+        const result = await fetchImg(src)
+        if (cancelExportRef.current) {
+          break
+        }
+        setExportProgress(i + 1)
+        if (result.ok) {
+          const ext =
+            extFromContentType(result.contentType) ||
+            extFromUrl(result.usedUrl) ||
+            'gif'
+          await handleExport(result.usedUrl, i, result.buffer, ext)
+          await sleep(100)
+        }
       }
+    } finally {
+      setIsExporting(false)
+      setCancelRequested(false)
     }
+
+    if (cancelExportRef.current) {
+      setExportProgress(0)
+      return
+    }
+
     // await message('完成咯～')
     await sleep(1500)
-    setIsExporting(false)
     setExportProgress(0)
     openDir()
+  }
+
+  function cancelExport() {
+    cancelExportRef.current = true
+    setCancelRequested(true)
   }
 
   // 创建表情包目录
@@ -410,10 +435,19 @@ function App() {
                     disabled={
                       !selectedTargetDir ||
                       isExporting ||
+                      cancelRequested ||
                       !downloadImgList.length
                     }
                   >
                     导出
+                  </Button>
+                  <Button
+                    color="warning"
+                    variant="outlined"
+                    onClick={cancelExport}
+                    disabled={!isExporting || cancelRequested}
+                  >
+                    {cancelRequested ? '正在取消…' : '取消导出'}
                   </Button>
                   <Button
                     variant="text"
@@ -422,7 +456,8 @@ function App() {
                       !downloadDirPath ||
                       !customEmotionsDirName ||
                       !hasEmotionsDir ||
-                      isExporting
+                      isExporting ||
+                      cancelRequested
                     }
                   >
                     打开下载目录

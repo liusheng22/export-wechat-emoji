@@ -1,10 +1,10 @@
 name: release
 
-# 这里是执行的分支，即只有向release分支推送代码才会执行构建
+# 仅通过 tag 触发构建和发布
 on:
   push:
-    branches:
-      - release
+    tags:
+      - 'v*' # 监听所有以 v 开头的 tag（如 v0.0.3）
 
 jobs:
   publish-tauri:
@@ -18,25 +18,31 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整的 git 历史，包括 tag 信息
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.1
 
       - name: setup node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: install frontend dependencies
-        run: |
-          npm install -g pnpm
-          pnpm install # change this to npm or pnpm depending on which one you use
+        run: pnpm install --frozen-lockfile
         id: install_frontend_dependencies
-      - name: Clear Yarn cache on failure
-        if: steps.install_frontend_dependencies=='failure'
+      - name: Clear pnpm cache on failure
+        if: steps.install_frontend_dependencies.outcome == 'failure'
         run: |
           pnpm store prune
-          pnpm install
+          pnpm install --no-frozen-lockfile
 
       - uses: tauri-apps/tauri-action@v0
         env:

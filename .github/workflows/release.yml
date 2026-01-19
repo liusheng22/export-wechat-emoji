@@ -21,10 +21,9 @@ jobs:
         with:
           fetch-depth: 0 # 获取完整的 git 历史，包括 tag 信息
 
+      # pnpm 版本会自动从 package.json 的 packageManager 字段读取
       - name: setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.1
 
       - name: setup node
         uses: actions/setup-node@v4

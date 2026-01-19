@@ -1,6 +1,6 @@
 [package]
 name = "导出微信表情包"
-version = "0.0.2"
+version = "0.0.3"
 description = "一个在 macOS 上导出微信所有表情包的小工具"
 authors = ["liusheng <black.liusheng@gmail.com>"]
 edition = "2021"

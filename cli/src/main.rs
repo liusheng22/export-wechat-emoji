@@ -59,6 +59,9 @@ enum Commands {
 
     /// 一键导出表情包图片到目录（会自动生成 URL 列表并下载）
     Export(ExportArgs),
+
+    /// 更新 CLI（脚本方式；如通过 brew 安装请优先用 brew upgrade）
+    Update(UpdateArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -182,6 +185,29 @@ struct ExportArgs {
     json: bool,
 }
 
+#[derive(Parser, Debug)]
+struct UpdateArgs {
+    /// 指定升级版本（例如 v0.1.1），默认 latest
+    #[arg(long)]
+    version: Option<String>,
+
+    /// 安装目录，默认 ~/.local/bin
+    #[arg(long)]
+    install_dir: Option<String>,
+
+    /// GitHub 仓库，默认 liusheng22/export-wechat-emoji
+    #[arg(long, default_value = "liusheng22/export-wechat-emoji")]
+    repo: String,
+
+    /// 即使检测到可能是 brew 安装，也强制走脚本覆盖安装
+    #[arg(long)]
+    force_script: bool,
+
+    /// 以 JSON 输出
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone)]
 struct Account {
     wxid: String,
@@ -221,6 +247,15 @@ struct ExportResult {
     failed: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateResult {
+    version: String,
+    install_dir: String,
+    repo: String,
+    installer_url: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -229,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Key(args) => cmd_key(&cli, args).await?,
         Commands::Urls(args) => cmd_urls(&cli, args).await?,
         Commands::Export(args) => cmd_export(&cli, args).await?,
+        Commands::Update(args) => cmd_update(args).await?,
     }
     Ok(())
 }
@@ -1566,6 +1602,106 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = args;
+        return Err(anyhow!("`wxemoticon update` 目前仅支持 macOS"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let current_exe = std::env::current_exe().ok();
+        let current_exe_text = current_exe
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+
+        if !args.force_script {
+            let lower = current_exe_text.to_ascii_lowercase();
+            let likely_brew = lower.contains("/cellar/")
+                || lower.contains("/homebrew/")
+                || lower.starts_with("/opt/homebrew/bin/wxemoticon")
+                || lower.starts_with("/usr/local/bin/wxemoticon");
+            if likely_brew {
+                return Err(anyhow!(
+                    "检测到你可能通过 Homebrew 安装（{}）。请使用：`brew update && brew upgrade wxemoticon`；如需脚本强制覆盖，请加 `--force-script`。",
+                    current_exe_text
+                ));
+            }
+        }
+
+        let install_dir = if let Some(v) = &args.install_dir {
+            resolve_user_path(v)?
+        } else {
+            home_dir()?.join(".local/bin")
+        };
+
+        let version = args
+            .version
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "latest".to_string());
+
+        let installer_url = format!(
+            "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.sh",
+            args.repo.trim()
+        );
+
+        let mut env_parts = vec![
+            format!("WXEMOTICON_REPO={}", shell_single_quote(args.repo.trim())),
+            format!(
+                "INSTALL_DIR={}",
+                shell_single_quote(&install_dir.display().to_string())
+            ),
+        ];
+        if version != "latest" {
+            env_parts.push(format!("WXEMOTICON_VERSION={}", shell_single_quote(&version)));
+        }
+
+        let cmdline = format!(
+            "curl -fsSL {} | env {} bash",
+            shell_single_quote(&installer_url),
+            env_parts.join(" ")
+        );
+
+        if !args.json {
+            eprintln!("开始更新 wxemoticon（version: {version}）...");
+        }
+
+        let status = Command::new("/bin/bash")
+            .args(["-lc", &cmdline])
+            .status()
+            .context("执行更新命令失败")?;
+
+        if !status.success() {
+            return Err(anyhow!("更新失败（退出码：{}）", status));
+        }
+
+        if args.json {
+            let out = UpdateResult {
+                version,
+                install_dir: install_dir.display().to_string(),
+                repo: args.repo.trim().to_string(),
+                installer_url,
+            };
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("更新完成。请运行 `wxemoticon --version` 验证版本。");
+        }
+    }
+
+    Ok(())
+}
+
+fn shell_single_quote(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
 }
 
 fn resolve_user_path(input: &str) -> anyhow::Result<PathBuf> {

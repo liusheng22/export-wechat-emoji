@@ -45,7 +45,7 @@
 
 如果你更喜欢命令行，可使用 `wxemoticon`（macOS）。
 
-安装最新版本：
+安装方式 A：安装脚本（默认，零配置）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
@@ -55,6 +55,20 @@ curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.1.1 bash
+```
+
+安装方式 B：Homebrew（推荐长期维护）
+
+```bash
+brew tap liusheng22/wxemoticon
+brew install wxemoticon
+```
+
+Homebrew 升级：
+
+```bash
+brew update
+brew upgrade wxemoticon
 ```
 
 安装后验证：
@@ -70,6 +84,20 @@ wxemoticon --help
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
+
+CLI 内置升级命令（脚本安装用户可用）：
+
+```bash
+# 升级到最新
+wxemoticon update
+
+# 升级到指定版本
+wxemoticon update --version v0.1.1
+```
+
+说明：
+- 如果你是通过 Homebrew 安装，请优先使用 `brew upgrade wxemoticon`。
+- `wxemoticon update` 默认会提示你使用 brew 升级，避免覆盖 brew 管理文件。
 
 ### CLI 能力总览
 
@@ -228,3 +256,18 @@ cargo run --manifest-path cli/Cargo.toml -- --help
 # 构建 CLI（release）
 cargo build --manifest-path cli/Cargo.toml --release
 ```
+
+### Homebrew 发布（维护者）
+
+- `tap`：一个 Homebrew 公式仓库（通常是 GitHub 仓库），用于存放公式文件。
+- `formula`：一个 Ruby 文件（例如 `Formula/wxemoticon.rb`），定义下载地址、校验值和安装方式。
+
+本项目已经支持在 release workflow 中自动更新 tap 里的公式文件（可选）：
+
+1. 创建 GitHub 仓库（示例）：`liusheng22/homebrew-wxemoticon`
+2. 在该仓库创建 `Formula/` 目录
+3. 在本仓库 Secrets 中配置：
+   - `HOMEBREW_TAP_REPO`：例如 `liusheng22/homebrew-wxemoticon`
+   - `HOMEBREW_TAP_TOKEN`：对 tap 仓库有写权限的 token
+
+配置完成后，每次发 tag 触发 release 时，会自动生成并提交 `Formula/wxemoticon.rb` 到 tap 仓库。

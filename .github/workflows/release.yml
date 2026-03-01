@@ -88,6 +88,11 @@ jobs:
             - wxemoticon key
             - wxemoticon urls
             - wxemoticon export
+            - wxemoticon update
+
+            Homebrew（可选）：
+            - brew tap liusheng22/wxemoticon
+            - brew install wxemoticon
           releaseDraft: false
           prerelease: false
 
@@ -143,6 +148,44 @@ jobs:
             wxemoticon-x86_64-apple-darwin.tar.gz
             wxemoticon-SHA256SUMS.txt
             scripts/install-wxemoticon.sh
+
+      - name: publish Homebrew formula to tap repo
+        if: matrix.build_cli && secrets.HOMEBREW_TAP_TOKEN != '' && secrets.HOMEBREW_TAP_REPO != ''
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_REPO: ${{ secrets.HOMEBREW_TAP_REPO }}
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+          ARM_SHA="$(awk '/wxemoticon-aarch64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS.txt)"
+          X64_SHA="$(awk '/wxemoticon-x86_64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS.txt)"
+
+          if [[ -z "${ARM_SHA}" || -z "${X64_SHA}" ]]; then
+            echo "failed to parse CLI checksums from wxemoticon-SHA256SUMS.txt" >&2
+            exit 1
+          fi
+
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "${TMP_DIR}" >/dev/null 2>&1 || true' EXIT
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" "${TMP_DIR}/tap"
+          mkdir -p "${TMP_DIR}/tap/Formula"
+          bash scripts/generate-homebrew-formula.sh "${TAG}" "${ARM_SHA}" "${X64_SHA}" "${REPO}" > "${TMP_DIR}/tap/Formula/wxemoticon.rb"
+
+          cd "${TMP_DIR}/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [[ -z "$(git status --porcelain -- Formula/wxemoticon.rb)" ]]; then
+            echo "Homebrew formula unchanged, skip push."
+            exit 0
+          fi
+
+          git add Formula/wxemoticon.rb
+          git commit -m "wxemoticon ${TAG}"
+          git push origin HEAD
 
   cleanup-release-default-assets:
     needs: publish-tauri

@@ -443,9 +443,13 @@ fn find_accounts() -> anyhow::Result<Vec<Account>> {
     for ent in std::fs::read_dir(&base).context("读取 xwechat_files 失败")? {
         let ent = ent?;
         let name = ent.file_name().to_string_lossy().to_string();
-        if !name.starts_with("wxid_") || name == "all_users" {
+        
+        // 过滤掉微信内部已知的非账号共享目录
+        let ignore_dirs = ["all_users", "Backup", "WMPF", "AppletCaches", "Update"];
+        if ignore_dirs.contains(&name.as_str()) || name.starts_with('.') {
             continue;
         }
+
         let db = ent.path().join("db_storage/emoticon/emoticon.db");
         if db.exists() {
             let mtime = std::fs::metadata(&db).ok().and_then(|m| m.modified().ok());

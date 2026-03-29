@@ -461,6 +461,134 @@ struct WeChatRunningCheck {
     matches: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathAccessStatus {
+    path: String,
+    exists: bool,
+    readable: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WeChatEnvironmentDiag {
+    v4_data_dir: PathAccessStatus,
+    legacy_data_dir: PathAccessStatus,
+    default_wechat_app: PathAccessStatus,
+}
+
+#[cfg(target_os = "macos")]
+fn home_path() -> Result<PathBuf, String> {
+    tauri::api::path::home_dir().ok_or_else(|| "failed to resolve home directory".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn path_access_status(path: PathBuf, expect_dir: bool) -> PathAccessStatus {
+    let display = path.display().to_string();
+    match std::fs::metadata(&path) {
+        Ok(meta) => {
+            if expect_dir {
+                if !meta.is_dir() {
+                    return PathAccessStatus {
+                        path: display,
+                        exists: true,
+                        readable: false,
+                        error: Some("path exists but is not a directory".to_string()),
+                    };
+                }
+                match std::fs::read_dir(&path) {
+                    Ok(_) => PathAccessStatus {
+                        path: display,
+                        exists: true,
+                        readable: true,
+                        error: None,
+                    },
+                    Err(e) => PathAccessStatus {
+                        path: display,
+                        exists: true,
+                        readable: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            } else if meta.is_dir() || meta.is_file() {
+                PathAccessStatus {
+                    path: display,
+                    exists: true,
+                    readable: true,
+                    error: None,
+                }
+            } else {
+                PathAccessStatus {
+                    path: display,
+                    exists: true,
+                    readable: false,
+                    error: Some("path exists but is not a regular file/app bundle".to_string()),
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PathAccessStatus {
+            path: display,
+            exists: false,
+            readable: false,
+            error: None,
+        },
+        Err(e) => PathAccessStatus {
+            path: display,
+            exists: false,
+            readable: false,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn collect_wechat_process_matches(wechat_app_path: &str) -> Vec<String> {
+    let home_dir = match home_path() {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let cache_app = home_dir.join("Library/Caches/export-wechat-emoji/WeChat.app");
+    let xwechat_files = home_dir.join(
+        "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files",
+    );
+
+    let mut needles = vec![
+        format!("{}/Contents/", wechat_app_path.trim_end_matches('/')),
+        format!("{}/Contents/", cache_app.display()),
+        "/Applications/WeChat.app/Contents/".to_string(),
+        format!("--wechat-files-path={}", xwechat_files.display()),
+        "--bundle-id=5A4RE8SF68.com.tencent.xinWeChat".to_string(),
+    ];
+    needles.sort();
+    needles.dedup();
+
+    let out = Command::new("/bin/ps")
+        .args(["-A", "-o", "pid=,args="])
+        .output();
+    let Ok(out) = out else { return vec![] };
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let mut matches = Vec::<String>::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let matched = needles.iter().any(|needle| line.contains(needle))
+            || (line.contains("/Contents/MacOS/WeChat ") && line.contains("com.tencent.xinWeChat"))
+            || (line.contains("/Contents/MacOS/WeChatAppEx")
+                && line.contains("com.tencent.xinWeChat"));
+        if matched {
+            matches.push(line.to_string());
+        }
+    }
+
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
 #[tauri::command]
 fn file_mtime_ms(path: String) -> Result<Option<i64>, String> {
     let trimmed = path.trim();
@@ -506,42 +634,38 @@ fn check_wechat_running(wechat_app_path: Option<String>) -> Result<WeChatRunning
 
     #[cfg(target_os = "macos")]
     {
-        fn pgrep_af(pattern: &str) -> Vec<String> {
-            let out = Command::new("/usr/bin/pgrep")
-                .args(["-af", pattern])
-                .output();
-            let Ok(out) = out else { return vec![] };
-            if !out.status.success() {
-                return vec![];
-            }
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                // Avoid false positives if pgrep matches itself.
-                .filter(|s| !s.contains("/usr/bin/pgrep"))
-                .collect()
-        }
-
         let wechat_app_path = wechat_app_path.unwrap_or_else(|| "/Applications/WeChat.app".to_string());
-        let wechat_contents = format!(
-            "{}/Contents/",
-            wechat_app_path.trim_end_matches('/')
-        );
-        let home_dir = tauri::api::path::home_dir()
-            .ok_or_else(|| "failed to resolve home directory".to_string())?;
-        let cache_app = home_dir.join("Library/Caches/export-wechat-emoji/WeChat.app");
-        let cache_contents = format!("{}/Contents/", cache_app.display());
-
-        let mut matches = Vec::<String>::new();
-        matches.extend(pgrep_af(&wechat_contents));
-        matches.extend(pgrep_af(&cache_contents));
-        matches.sort();
-        matches.dedup();
+        let matches = collect_wechat_process_matches(&wechat_app_path);
 
         Ok(WeChatRunningCheck {
             running: !matches.is_empty(),
             matches,
+        })
+    }
+}
+
+#[tauri::command]
+fn diagnose_wechat_environment() -> Result<WeChatEnvironmentDiag, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err("diagnose_wechat_environment is only supported on macOS".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home_dir = home_path()?;
+        let v4_data_dir = home_dir.join(
+            "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files",
+        );
+        let legacy_data_dir = home_dir.join(
+            "Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat",
+        );
+        let default_wechat_app = PathBuf::from("/Applications/WeChat.app");
+
+        Ok(WeChatEnvironmentDiag {
+            v4_data_dir: path_access_status(v4_data_dir, true),
+            legacy_data_dir: path_access_status(legacy_data_dir, true),
+            default_wechat_app: path_access_status(default_wechat_app, false),
         })
     }
 }
@@ -584,45 +708,7 @@ fn auto_dump_emoticon_urls_v4_blocking(
     }
 
     fn wechat_running_matches(wechat_app_path: &str) -> Vec<String> {
-        fn pgrep_af(pattern: &str) -> Vec<String> {
-            let out = Command::new("/usr/bin/pgrep").args(["-af", pattern]).output();
-            let Ok(out) = out else { return vec![] };
-            if !out.status.success() {
-                return vec![];
-            }
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .filter(|s| !s.contains("/usr/bin/pgrep"))
-                .collect()
-        }
-
-        let home_dir = match tauri::api::path::home_dir() {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let wechat_contents = format!(
-            "{}/Contents/",
-            wechat_app_path.trim_end_matches('/')
-        );
-        let cache_app = home_dir.join("Library/Caches/export-wechat-emoji/WeChat.app");
-        let cache_contents = format!("{}/Contents/", cache_app.display());
-
-        // Also check the canonical /Applications/WeChat.app (covers the .bak case).
-        let canonical_contents = "/Applications/WeChat.app/Contents/".to_string();
-
-        let mut matches = Vec::<String>::new();
-        matches.extend(pgrep_af(&wechat_contents));
-        matches.extend(pgrep_af(&cache_contents));
-        if wechat_contents != canonical_contents {
-            matches.extend(pgrep_af(&canonical_contents));
-        }
-
-        matches.sort();
-        matches.dedup();
-        matches
+        collect_wechat_process_matches(wechat_app_path)
     }
 
     fn normalize_key_file_line(s: &str) -> String {
@@ -1161,6 +1247,7 @@ fn main() {
             greet,
             file_mtime_ms,
             check_wechat_running,
+            diagnose_wechat_environment,
             extract_fav_urls,
             extract_emoticon_urls_v4,
             auto_dump_emoticon_urls_v4

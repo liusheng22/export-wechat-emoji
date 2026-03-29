@@ -33,7 +33,13 @@ import { writeText } from '@tauri-apps/api/clipboard'
 import { message, open } from '@tauri-apps/api/dialog'
 import { listen } from '@tauri-apps/api/event'
 import { exists as fsExists, removeFile } from '@tauri-apps/api/fs'
-import { appDataDir, dirname, downloadDir, homeDir, join } from '@tauri-apps/api/path'
+import {
+  appDataDir,
+  dirname,
+  downloadDir,
+  homeDir,
+  join
+} from '@tauri-apps/api/path'
 import { Command } from '@tauri-apps/api/shell'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { PhotoProvider, PhotoView } from 'react-photo-view'
@@ -44,7 +50,6 @@ import {
   extractFavUrls,
   type AutoDumpUrlsResult
 } from './services/archive'
-import { checkWeChatRunning } from './services/system'
 import { fetchBinaryWithFallback } from './services/downloader'
 import {
   buildUniqueFileKeys,
@@ -62,7 +67,16 @@ import {
   extFromUrl,
   getStodownloadCandidates
 } from './services/stodownload'
-import { encodeEmojiTarget, findEmojiTargetsWithMeta, type EmojiTargetMeta } from './services/wechat'
+import {
+  checkWeChatRunning,
+  diagnoseWeChatEnvironment,
+  type WeChatEnvironmentDiag
+} from './services/system'
+import {
+  encodeEmojiTarget,
+  findEmojiTargetsWithMeta,
+  type EmojiTargetMeta
+} from './services/wechat'
 import './App.css'
 
 type FlowStage =
@@ -198,6 +212,26 @@ function App() {
     return d.toLocaleString('zh-CN', { hour12: false })
   }, [selectedTargetMeta?.mtimeMs])
 
+  function buildWeChatAccessHint(
+    diag: WeChatEnvironmentDiag | null
+  ): string | null {
+    if (!diag) {
+      return null
+    }
+
+    const unreadable =
+      [diag.v4DataDir, diag.legacyDataDir].find(
+        (item) => item.exists && !item.readable
+      ) || null
+    if (!unreadable) {
+      return null
+    }
+
+    return `无法读取微信数据目录：${unreadable.path}。请确认微信已登录；如果微信已登录但仍失败，请在系统设置中为本应用开启“完全磁盘访问权限”后重试。${
+      unreadable.error ? `（${unreadable.error}）` : ''
+    }`
+  }
+
   async function refreshTargets() {
     setTargetsLoading(true)
     setTargetsError(null)
@@ -233,6 +267,14 @@ function App() {
         // Default to the most recently updated target.
         setSelectedTargetValue(values[0])
       }
+
+      if (!list.length) {
+        const diag = await diagnoseWeChatEnvironment().catch(() => null)
+        const hint = buildWeChatAccessHint(diag)
+        if (hint) {
+          setTargetsError(hint)
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setTargetsError(msg || '扫描账号失败')
@@ -246,12 +288,18 @@ function App() {
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     refreshTargets()
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    downloadDir().then(setDownloadDirPath).catch(() => {})
+    downloadDir()
+      .then(setDownloadDirPath)
+      .catch(() => {})
 
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    homeDir().then(setHomeDirPath).catch(() => {})
+    homeDir()
+      .then(setHomeDirPath)
+      .catch(() => {})
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    appDataDir().then(setAppDataDirPath).catch(() => {})
+    appDataDir()
+      .then(setAppDataDirPath)
+      .catch(() => {})
 
     const savedWeChatAppPath =
       localStorage.getItem('wxemoticon_wechat_app_path') || ''
@@ -329,7 +377,10 @@ function App() {
     try {
       const parsed = JSON.parse(incompleteRaw) as Partial<IncompleteExport>
       if (parsed?.dirName && typeof parsed.groupSize === 'number') {
-        setIncompleteExport({ dirName: parsed.dirName, groupSize: parsed.groupSize })
+        setIncompleteExport({
+          dirName: parsed.dirName,
+          groupSize: parsed.groupSize
+        })
       } else {
         setIncompleteExport(null)
       }
@@ -554,8 +605,34 @@ function App() {
   }
 
   async function loadPreview() {
-    if (!selectedTargetMeta) {
-      return await message('请先选择账号', { title: '提示', type: 'info' })
+    let target = selectedTargetMeta
+    if (!target && targets.length === 1) {
+      target = targets[0]
+      setSelectedTargetValue(valueOfTarget(targets[0]))
+    }
+
+    if (!target) {
+      if (targetsLoading) {
+        const tip = '正在扫描微信账号，请稍候再试。'
+        showToastMessage(tip, 'info')
+        return await message(tip, { title: '提示', type: 'info' })
+      }
+
+      if (!targets.length) {
+        const diag = await diagnoseWeChatEnvironment().catch(() => null)
+        const tip =
+          buildWeChatAccessHint(diag) ||
+          '未检测到微信表情包数据。请确认已安装并登录微信；如果微信已登录但仍为空，请点击“刷新”，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
+        setFlowError(tip)
+        setFlowStage('error')
+        setFlowHint('')
+        showToastMessage(tip, 'warning')
+        return await message(tip, { title: '提示', type: 'warning' })
+      }
+
+      const tip = '请先选择账号，再点击「一键获取并预览」。'
+      showToastMessage(tip, 'info')
+      return await message(tip, { title: '提示', type: 'info' })
     }
 
     setFlowError(null)
@@ -567,11 +644,11 @@ function App() {
     setPreviewPage(1)
     setLastDumpResult(null)
 
-    if (selectedTargetMeta.kind === 'legacy') {
+    if (target.kind === 'legacy') {
       setFlowStage('offlineParsing')
       setFlowHint('正在解析旧版微信数据…')
       try {
-        const urls = await extractFavUrls(selectedTargetMeta.favArchivePath)
+        const urls = await extractFavUrls(target.favArchivePath)
         if (!urls.length) {
           throw new Error('没有解析到任何表情包链接')
         }
@@ -591,7 +668,7 @@ function App() {
     // v4 flow:
     // - If we already have a cached db key, we can try offline parsing without forcing the user to quit WeChat.
     // - Only require quitting WeChat when we need to dump a new key.
-    const hasKey = await hasCachedDbKey(selectedTargetMeta.wxidDir)
+    const hasKey = await hasCachedDbKey(target.wxidDir)
     if (!hasKey) {
       setFlowStage('checkingWechat')
       setFlowHint('正在检查微信是否已退出…')
@@ -602,6 +679,10 @@ function App() {
           setWeChatRunningMatches(check.matches || [])
           setFlowStage('idle')
           setFlowHint('')
+          showToastMessage(
+            '必须先完全退出微信，才能继续获取表情数据。',
+            'warning'
+          )
           return
         }
       } catch (err) {
@@ -609,6 +690,7 @@ function App() {
         setFlowError(msg || '检查微信进程失败')
         setFlowStage('error')
         setFlowHint('')
+        showToastMessage(msg || '检查微信进程失败', 'error')
         return
       }
     }
@@ -617,11 +699,12 @@ function App() {
     try {
       const ok = await fsExists(wechatAppPath)
       if (!ok) {
-        setFlowError(
+        const tip =
           '未找到 WeChat.app。请在「高级选项」里选择正确的 WeChat.app 路径后重试。'
-        )
+        setFlowError(tip)
         setFlowStage('error')
         setFlowHint('')
+        showToastMessage(tip, 'error')
         return
       }
     } catch {
@@ -635,12 +718,9 @@ function App() {
         : '正在准备微信副本并获取表情数据…（如弹出微信，请登录并打开一次表情面板）'
     )
     flowActiveRef.current = true
-    activeFlowWxidRef.current = selectedTargetMeta.wxidDir
+    activeFlowWxidRef.current = target.wxidDir
     try {
-      const result = await autoDumpEmoticonUrlsV4(
-        selectedTargetMeta.wxidDir,
-        wechatAppPath
-      )
+      const result = await autoDumpEmoticonUrlsV4(target.wxidDir, wechatAppPath)
       setLastDumpResult(result)
       const urls = result.urls || []
       if (!urls.length) {
@@ -671,6 +751,10 @@ function App() {
         setFlowError(null)
         setFlowStage('idle')
         setFlowHint('')
+        showToastMessage(
+          '必须先完全退出微信，才能继续获取表情数据。',
+          'warning'
+        )
         return
       }
       const friendly = text.includes('timed out waiting for db key')
@@ -682,6 +766,7 @@ function App() {
       setFlowError(friendly)
       setFlowStage('error')
       setFlowHint('')
+      showToastMessage(friendly || '自动导出失败', 'error')
     }
   }
 
@@ -691,7 +776,10 @@ function App() {
     resumeExisting: boolean
   }) {
     if (!rawUrls.length) {
-      return await message('请先获取并预览表情包', { title: '提示', type: 'info' })
+      return await message('请先获取并预览表情包', {
+        title: '提示',
+        type: 'info'
+      })
     }
 
     setIsExporting(true)
@@ -843,7 +931,10 @@ function App() {
     }
 
     if (canceled) {
-      showToastMessage('已取消导出：你可以选择“继续上次导出（断点续跑）”', 'warning')
+      showToastMessage(
+        '已取消导出：你可以选择“继续上次导出（断点续跑）”',
+        'warning'
+      )
     } else {
       showToastMessage('导出完成', 'success')
     }
@@ -851,7 +942,10 @@ function App() {
 
   async function startNewExport() {
     if (!rawUrls.length) {
-      return await message('请先获取并预览表情包', { title: '提示', type: 'info' })
+      return await message('请先获取并预览表情包', {
+        title: '提示',
+        type: 'info'
+      })
     }
     if (exportGroupMode === 'custom') {
       const n = Math.floor(Number(exportCustomGroupSize))
@@ -917,7 +1011,7 @@ function App() {
               {!targetsLoading && !targets.length && !targetsError && (
                 <Alert severity="warning">
                   没找到微信表情包数据（旧版 fav.archive / 新版 emoticon.db）。
-                  请确认已安装并登录微信。
+                  请确认已安装并登录微信；如果微信已登录但仍为空，请点击「刷新」，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。
                 </Alert>
               )}
 
@@ -944,7 +1038,10 @@ function App() {
                     {targets.map((t) => {
                       const value =
                         t.kind === 'v4'
-                          ? encodeEmojiTarget({ kind: 'v4', wxidDir: t.wxidDir })
+                          ? encodeEmojiTarget({
+                              kind: 'v4',
+                              wxidDir: t.wxidDir
+                            })
                           : encodeEmojiTarget({
                               kind: 'legacy',
                               versionDir: t.versionDir,
@@ -1002,11 +1099,7 @@ function App() {
                   severity="error"
                   action={
                     selectedTargetMeta?.kind === 'v4' ? (
-                      <Button
-                        color="inherit"
-                        size="small"
-                        onClick={openLogDir}
-                      >
+                      <Button color="inherit" size="small" onClick={openLogDir}>
                         打开日志目录
                       </Button>
                     ) : undefined
@@ -1021,7 +1114,7 @@ function App() {
                   size="large"
                   variant="contained"
                   onClick={loadPreview}
-                  disabled={isExporting || targetsLoading || !selectedTargetMeta}
+                  disabled={isExporting || targetsLoading}
                 >
                   一键获取并预览
                 </Button>
@@ -1197,16 +1290,15 @@ function App() {
                   <LinearProgress
                     variant="determinate"
                     value={
-                      rawUrls.length ? (exportProgress / rawUrls.length) * 100 : 0
+                      rawUrls.length
+                        ? (exportProgress / rawUrls.length) * 100
+                        : 0
                     }
                   />
                 </Box>
               )}
 
-              <Button
-                variant="text"
-                onClick={() => setShowAdvanced((v) => !v)}
-              >
+              <Button variant="text" onClick={() => setShowAdvanced((v) => !v)}>
                 {showAdvanced ? '收起高级选项' : '展开高级选项'}
               </Button>
 
@@ -1252,7 +1344,8 @@ function App() {
 
                   {selectedTargetMeta?.kind === 'v4' && !lastDumpResult && (
                     <Typography variant="body2" color="text.secondary">
-                      请先点击「一键获取并预览」一次，才能生成/刷新 db key、URL 列表与日志。
+                      请先点击「一键获取并预览」一次，才能生成/刷新 db key、URL
+                      列表与日志。
                     </Typography>
                   )}
 
@@ -1263,7 +1356,10 @@ function App() {
                           size="small"
                           variant="outlined"
                           onClick={() =>
-                            copyToClipboard(lastDumpResult.dbKey, '已复制 db key')
+                            copyToClipboard(
+                              lastDumpResult.dbKey,
+                              '已复制 db key'
+                            )
                           }
                         >
                           复制 db key
@@ -1382,7 +1478,11 @@ function App() {
               </Typography>
             ) : (
               <Typography variant="body1" color="text.secondary">
-                {selectedTargetValue ? '啥也没有' : '先选择账号，然后点击「一键获取并预览」'}
+                {!targets.length
+                  ? '暂未检测到微信账号；请确认微信已登录，然后点击「刷新」'
+                  : selectedTargetValue
+                    ? '暂无预览，请先点击「一键获取并预览」'
+                    : '先选择账号，然后点击「一键获取并预览」'}
               </Typography>
             )}
 
@@ -1398,7 +1498,10 @@ function App() {
                   >
                     <Typography variant="body2" color="text.secondary">
                       第 {(previewPage - 1) * previewPageSize + 1}-
-                      {Math.min(previewPage * previewPageSize, showImgList.length)}{' '}
+                      {Math.min(
+                        previewPage * previewPageSize,
+                        showImgList.length
+                      )}{' '}
                       个 / 共 {showImgList.length} 个
                     </Typography>
                     <Pagination
@@ -1521,7 +1624,8 @@ function App() {
                 {exportResult?.skipped}，失败：{exportResult?.failed}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                说明、URL 列表与（新版微信时）db key 在导出目录的「导出信息」子目录中。
+                说明、URL 列表与（新版微信时）db key
+                在导出目录的「导出信息」子目录中。
               </Typography>
             </Stack>
           </DialogContent>
@@ -1553,11 +1657,14 @@ function App() {
           <DialogTitle>确认清除缓存？</DialogTitle>
           <DialogContent>
             <Typography variant="body2" color="text.secondary" sx={{ pt: 1 }}>
-              将删除当前账号的 db key、URL 列表与日志缓存文件。下次需要重新获取。
+              将删除当前账号的 db key、URL
+              列表与日志缓存文件。下次需要重新获取。
             </Typography>
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setConfirmClearCacheOpen(false)}>取消</Button>
+            <Button onClick={() => setConfirmClearCacheOpen(false)}>
+              取消
+            </Button>
             <Button
               color="warning"
               onClick={() => {

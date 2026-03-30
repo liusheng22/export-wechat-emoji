@@ -4,7 +4,7 @@ name: release
 on:
   push:
     tags:
-      - 'v*' # 监听所有以 v 开头的 tag（如 v0.1.1）
+      - 'v*' # 监听所有以 v 开头的 tag（如 v0.1.2）
 
 jobs:
   publish-tauri:

@@ -150,12 +150,17 @@ jobs:
             scripts/install-wxemoticon.sh
 
       - name: publish Homebrew formula to tap repo
-        if: matrix.build_cli && secrets.HOMEBREW_TAP_TOKEN != '' && secrets.HOMEBREW_TAP_REPO != ''
+        if: matrix.build_cli
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           HOMEBREW_TAP_REPO: ${{ secrets.HOMEBREW_TAP_REPO }}
         run: |
           set -euo pipefail
+
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" || -z "${HOMEBREW_TAP_REPO:-}" ]]; then
+            echo "Homebrew tap secrets are not configured, skip publishing formula."
+            exit 0
+          fi
 
           TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"

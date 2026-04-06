@@ -18,6 +18,7 @@ serde_json = "1"
 plist = "1"
 aes = "0.8"
 anyhow = "1"
+base64 = "0.22"
 cbc = "0.1"
 cipher = "0.4"
 hex = "0.4"
@@ -26,6 +27,9 @@ pbkdf2 = "0.12"
 rusqlite = { version = "0.31", features = ["bundled"] }
 sha2 = "0.10"
 tempfile = "3"
+md5 = "0.7"
+miniz_oxide = "0.8"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "native-tls"] }
 
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
@@ -39,4 +43,14 @@ path = "src/main.rs"
 [[bin]]
 name = "extract-emoticon-urls"
 path = "src/bin/extract-emoticon-urls.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "debug-emoticon-catalog"
+path = "src/bin/debug-emoticon-catalog.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "diagnose-package-assets"
+path = "src/bin/diagnose-package-assets.rs"
 required-features = ["dev-tools"]

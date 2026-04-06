@@ -1,3 +1,4 @@
+import type { WeChatCurrentAccountProfile } from '../types'
 import { invoke } from '@tauri-apps/api/tauri'
 
 export type WeChatRunningCheck = {
@@ -28,6 +29,12 @@ export async function checkWeChatRunning(
 
 export async function diagnoseWeChatEnvironment(): Promise<WeChatEnvironmentDiag> {
   return await invoke<WeChatEnvironmentDiag>('diagnose_wechat_environment')
+}
+
+export async function readCurrentWeChatAccountProfile(): Promise<WeChatCurrentAccountProfile | null> {
+  return await invoke<WeChatCurrentAccountProfile | null>(
+    'read_current_wechat_account_profile'
+  )
 }
 
 export async function fileMtimeMs(path: string): Promise<number | null> {

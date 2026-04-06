@@ -1,4 +1,8 @@
-import type { ISelectOption } from '../types'
+import type {
+  EmojiTargetMeta,
+  ISelectOption,
+  WeChatCurrentAccountProfile
+} from '../types'
 import { BaseDirectory, exists, readDir } from '@tauri-apps/api/fs'
 import { fileMtimeMs } from './system'
 
@@ -25,20 +29,9 @@ export type EmojiTarget =
   | { kind: 'legacy'; versionDir: string; userDir: string }
   | { kind: 'v4'; wxidDir: string }
 
-export type EmojiTargetMeta =
-  | {
-      kind: 'v4'
-      wxidDir: string
-      emoticonDbPath: string
-      mtimeMs: number | null
-    }
-  | {
-      kind: 'legacy'
-      versionDir: string
-      userDir: string
-      favArchivePath: string
-      mtimeMs: number | null
-    }
+export function rawAccountIdOfTarget(target: EmojiTargetMeta): string {
+  return target.kind === 'v4' ? target.wxidDir : target.userDir
+}
 
 export function encodeEmojiTarget(target: EmojiTarget): string {
   if (target.kind === 'legacy') {
@@ -326,4 +319,63 @@ export async function findEmojiTargetsWithMeta(): Promise<
   }
 
   return out
+}
+
+export function mergeCurrentAccountProfileIntoTargets(
+  targets: Array<EmojiTargetMeta>,
+  profile: WeChatCurrentAccountProfile | null
+): Array<EmojiTargetMeta> {
+  if (!profile) {
+    return targets
+  }
+
+  const normalizedWxid = profile.wxid?.trim()
+  const normalizedName = profile.displayName?.trim()
+  const normalizedAvatar = profile.avatarUrl?.trim()
+
+  return targets.map((target) => {
+    const rawId = target.kind === 'v4' ? target.wxidDir : target.userDir
+    const normalizedRawId = rawId.trim()
+    const matched =
+      !!normalizedWxid &&
+      (normalizedWxid === normalizedRawId ||
+        normalizedRawId.includes(normalizedWxid) ||
+        normalizedWxid.includes(normalizedRawId))
+
+    if (!matched) {
+      return target
+    }
+
+    return {
+      ...target,
+      accountWxid: normalizedWxid || target.accountWxid,
+      displayName: normalizedName || target.displayName,
+      avatarUrl: normalizedAvatar || target.avatarUrl,
+      isCurrentLikelyAccount: true
+    }
+  })
+}
+
+export function displayNameOfTarget(target: EmojiTargetMeta): string {
+  const displayName = target.displayName?.trim()
+  if (displayName) {
+    return displayName
+  }
+
+  if (target.kind === 'v4') {
+    return target.accountWxid?.trim() || rawAccountIdOfTarget(target)
+  }
+
+  return target.accountWxid?.trim() || rawAccountIdOfTarget(target)
+}
+
+export function secondaryLabelOfTarget(target: EmojiTargetMeta): string {
+  const rawId = rawAccountIdOfTarget(target)
+  const parts = [
+    target.kind === 'v4' ? '新版微信 (4.x)' : `旧版微信 (${target.versionDir})`
+  ]
+  if (target.displayName?.trim()) {
+    parts.push(rawId)
+  }
+  return parts.join(' • ')
 }

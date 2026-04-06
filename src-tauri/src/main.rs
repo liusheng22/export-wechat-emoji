@@ -1,7 +1,10 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use aes::Aes256;
+mod stickerhub;
+
+use aes::{Aes128, Aes256};
+use aes::cipher::{BlockEncrypt, KeyInit};
 use cbc::cipher::block_padding::NoPadding;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
@@ -10,8 +13,8 @@ use plist::Value;
 use rusqlite::Connection;
 use serde::Serialize;
 use sha2::Sha512;
-use std::collections::HashSet;
-use std::fs::OpenOptions;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,6 +22,7 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 use tempfile::NamedTempFile;
 use tauri::Manager;
+use reqwest::blocking::Client;
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -258,7 +262,7 @@ fn decrypt_db_file_v4_with_key(path: &Path, key_bytes: &[u8], treat_as_passphras
         }
 
         // Verify HMAC over ciphertext + IV, plus page number.
-        let mut mac = HmacSha512::new_from_slice(&mac_key)
+        let mut mac = <HmacSha512 as Mac>::new_from_slice(&mac_key)
             .map_err(|e| DecryptError::Crypto(format!("hmac init: {e}")))?;
         mac.update(&buf[start + offset..iv_start + IV_SIZE]);
         mac.update(&((cur_page as u32) + 1).to_le_bytes());
@@ -435,6 +439,1250 @@ fn extract_emoticon_urls_v4(
     Ok(urls)
 }
 
+#[derive(Clone, Debug)]
+struct EmoticonUrlRow {
+    md5: String,
+    url: String,
+}
+
+#[derive(Clone, Debug)]
+struct EmoticonAlbumMemberRow {
+    md5: String,
+    sort_order: i64,
+    download_url: Option<String>,
+    encrypt_url: Option<String>,
+    aes_key_hex: Option<String>,
+    preview_path: Option<String>,
+    local_source_path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct MatchedLegacyStickerRoot {
+    path: PathBuf,
+    overlap: usize,
+    second_best_overlap: usize,
+    strong_match: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EmoticonRenderItem {
+    pub(crate) id: String,
+    pub(crate) md5: String,
+    pub(crate) src: String,
+    pub(crate) download_url: Option<String>,
+    pub(crate) local_source_path: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EmoticonAlbumMemberRef {
+    pub(crate) md5: String,
+    pub(crate) sort_order: i64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EmoticonAlbumCatalogItem {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) count: usize,
+    pub(crate) icon: Option<String>,
+    pub(crate) urls: Vec<String>,
+    pub(crate) items: Vec<EmoticonRenderItem>,
+    pub(crate) members: Vec<EmoticonAlbumMemberRef>,
+    pub(crate) package_id: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EmoticonCatalogResult {
+    pub(crate) mode: String,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) favorites: Vec<String>,
+    pub(crate) albums: Vec<EmoticonAlbumCatalogItem>,
+}
+
+fn build_sql_in_list(values: &[String]) -> String {
+    let normalized: Vec<String> = values
+        .iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if normalized.is_empty() {
+        return "''".to_string();
+    }
+
+    normalized
+        .iter()
+        .map(|item| format!("'{}'", item.replace('"', "\"").replace('\'', "''")))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+fn query_table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>, String> {
+    let sql = format!("PRAGMA table_info('{table}')");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare pragma table_info({table}): {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("query pragma table_info({table}): {e}"))?;
+
+    let mut out = HashSet::<String>::new();
+    for row in rows {
+        if let Ok(name) = row {
+            let normalized = name.trim().to_string();
+            if !normalized.is_empty() {
+                out.insert(normalized);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn pick_existing_column(columns: &HashSet<String>, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| columns.contains(**candidate))
+        .map(|candidate| (*candidate).to_string())
+}
+
+fn is_package_id_like_name(value: &str, package_id: &str) -> bool {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return true;
+    }
+    if !package_id.is_empty() && normalized == package_id {
+        return true;
+    }
+    normalized
+        .to_ascii_lowercase()
+        .starts_with("com.tencent.xin.emoticon.")
+}
+
+fn pick_readable_package_name(values: &[Option<String>], package_id: &str) -> Option<String> {
+    for candidate in values {
+        let Some(value) = candidate else { continue };
+        let text = value.trim();
+        if text.is_empty() || is_package_id_like_name(text, package_id) {
+            continue;
+        }
+        return Some(text.to_string());
+    }
+    None
+}
+
+fn with_decrypted_emoticon_conn<T, F>(
+    emoticon_db_path: &Path,
+    db_key: &str,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce(&Connection) -> Result<T, String>,
+{
+    let decrypted = decrypt_db_file_v4(emoticon_db_path, db_key)?;
+    let mut tmp = NamedTempFile::new().map_err(|e| format!("failed to create temp file: {e}"))?;
+    tmp.write_all(&decrypted)
+        .map_err(|e| format!("failed to write temp db: {e}"))?;
+    tmp.flush()
+        .map_err(|e| format!("failed to flush temp db: {e}"))?;
+
+    let conn = Connection::open(tmp.path()).map_err(|e| format!("open db: {e}"))?;
+    f(&conn)
+}
+
+fn collect_favorite_url_rows_from_conn(conn: &Connection) -> Result<Vec<EmoticonUrlRow>, String> {
+    let mut urls = Vec::<EmoticonUrlRow>::new();
+    let mut seen_md5 = HashSet::<String>::new();
+
+    let order_tables = ["kFavEmoticonOrderTable", "kCustomEmoticonOrderTable"];
+    for table in order_tables {
+        let sql = format!(
+            "SELECT o.md5, n.thumb_url, n.tp_url, n.cdn_url, n.extern_url, n.encrypt_url \
+             FROM {table} o LEFT JOIN kNonStoreEmoticonTable n ON o.md5 = n.md5 \
+             ORDER BY o.rowid"
+        );
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        }) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let before = urls.len();
+        for row in rows {
+            let (md5, thumb, tp, cdn, extern_url, encrypt_url) = match row {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let normalized_md5 = md5.trim().to_ascii_lowercase();
+            if normalized_md5.is_empty() || seen_md5.contains(&normalized_md5) {
+                continue;
+            }
+            if let Some(url) = best_emoticon_url_from_fields(&[
+                cdn,
+                tp,
+                thumb,
+                extern_url,
+                encrypt_url,
+            ]) {
+                seen_md5.insert(normalized_md5.clone());
+                urls.push(EmoticonUrlRow {
+                    md5: normalized_md5,
+                    url,
+                });
+            }
+        }
+
+        if urls.len() > before {
+            break;
+        }
+    }
+
+    if urls.is_empty() {
+        let mut stmt = conn
+            .prepare(
+                "SELECT md5, thumb_url, tp_url, cdn_url, extern_url, encrypt_url FROM kNonStoreEmoticonTable",
+            )
+            .map_err(|e| format!("query kNonStoreEmoticonTable: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| format!("query kNonStoreEmoticonTable: {e}"))?;
+        for row in rows {
+            let (md5, thumb, tp, cdn, extern_url, encrypt_url) =
+                row.map_err(|e| format!("query kNonStoreEmoticonTable: {e}"))?;
+            let normalized_md5 = md5.trim().to_ascii_lowercase();
+            if normalized_md5.is_empty() || seen_md5.contains(&normalized_md5) {
+                continue;
+            }
+            if let Some(url) = best_emoticon_url_from_fields(&[
+                cdn,
+                tp,
+                thumb,
+                extern_url,
+                encrypt_url,
+            ]) {
+                seen_md5.insert(normalized_md5.clone());
+                urls.push(EmoticonUrlRow {
+                    md5: normalized_md5,
+                    url,
+                });
+            }
+        }
+    }
+
+    Ok(urls)
+}
+
+#[derive(Clone, Debug, Default)]
+struct NonStoreMemberMeta {
+    download_url: Option<String>,
+    encrypt_url: Option<String>,
+    aes_key_hex: Option<String>,
+}
+
+fn normalize_16_byte_hex(input: &str) -> Option<[u8; 16]> {
+    let trimmed = input.trim();
+    if trimmed.len() != 32 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let decoded = hex::decode(trimmed).ok()?;
+    if decoded.len() != 16 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&decoded);
+    Some(out)
+}
+
+fn collect_non_store_member_meta_map_from_conn(
+    conn: &Connection,
+) -> Result<HashMap<String, NonStoreMemberMeta>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT md5, aes_key, thumb_url, tp_url, cdn_url, extern_url, encrypt_url FROM kNonStoreEmoticonTable",
+        )
+        .map_err(|e| format!("prepare kNonStoreEmoticonTable meta: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(|e| format!("query kNonStoreEmoticonTable meta: {e}"))?;
+
+    let mut out = HashMap::<String, NonStoreMemberMeta>::new();
+    for row in rows {
+        let (md5, aes_key, thumb, tp, cdn, extern_url, encrypt_url) =
+            row.map_err(|e| format!("query kNonStoreEmoticonTable meta: {e}"))?;
+        let normalized_md5 = md5.trim().to_ascii_lowercase();
+        if normalized_md5.is_empty() {
+            continue;
+        }
+
+        let download_url = best_emoticon_url_from_fields(&[
+            cdn,
+            tp,
+            thumb,
+            extern_url,
+            encrypt_url.clone(),
+        ]);
+
+        let normalized_aes_key = aes_key
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| normalize_16_byte_hex(value).is_some());
+
+        out.entry(normalized_md5).or_insert_with(|| NonStoreMemberMeta {
+            download_url,
+            encrypt_url: encrypt_url.map(|value| normalize_extracted_url(&value)),
+            aes_key_hex: normalized_aes_key,
+        });
+    }
+
+    Ok(out)
+}
+
+fn collect_active_package_ids_from_conn(conn: &Connection) -> Result<Vec<String>, String> {
+    let columns = query_table_columns(conn, "kStoreEmoticonPackageTable")?;
+    let package_id_col = pick_existing_column(&columns, &["package_id_", "package_id", "packageId"])
+        .ok_or_else(|| "kStoreEmoticonPackageTable missing package id column".to_string())?;
+    let download_status_col = pick_existing_column(&columns, &["download_status_", "download_status"]);
+    let remove_time_col = pick_existing_column(&columns, &["remove_time_", "remove_time"]);
+
+    let mut conditions = Vec::<String>::new();
+    if let Some(column) = download_status_col {
+        conditions.push(format!("coalesce({column}, 0) = 1"));
+    }
+    if let Some(column) = remove_time_col {
+        conditions.push(format!("coalesce({column}, 0) = 0"));
+    }
+
+    let sql = if conditions.is_empty() {
+        format!(
+            "SELECT DISTINCT {package_id_col} FROM kStoreEmoticonPackageTable ORDER BY {package_id_col} ASC"
+        )
+    } else {
+        format!(
+            "SELECT DISTINCT {package_id_col} FROM kStoreEmoticonPackageTable WHERE {} ORDER BY {package_id_col} ASC",
+            conditions.join(" AND ")
+        )
+    };
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare kStoreEmoticonPackageTable active packages: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query kStoreEmoticonPackageTable active packages: {e}"))?;
+
+    let mut out = Vec::<String>::new();
+    for row in rows {
+        let package_id = row
+            .map_err(|e| format!("query kStoreEmoticonPackageTable active packages: {e}"))?
+            .trim()
+            .to_string();
+        if !package_id.is_empty() {
+            out.push(package_id);
+        }
+    }
+    Ok(out)
+}
+
+fn decrypt_aes128_cbc_with_self_iv(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
+    type Aes128CbcDec = cbc::Decryptor<Aes128>;
+
+    let mut buf = data.to_vec();
+    let decrypted = Aes128CbcDec::new(&(*key).into(), &(*key).into())
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .map_err(|e| format!("aes-128-cbc decrypt failed: {e}"))?;
+
+    Ok(decrypted.to_vec())
+}
+
+fn detect_image_extension(data: &[u8]) -> Option<&'static str> {
+    let (start, _end, ext) = detect_embedded_image_slice(data)?;
+    if start == 0 {
+        Some(ext)
+    } else {
+        None
+    }
+}
+
+fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
+    let response = client
+        .get(url)
+        .send()
+        .and_then(|value| value.error_for_status())
+        .map_err(|e| format!("download failed: {e}"))?;
+
+    response.bytes()
+        .map(|value| value.to_vec())
+        .map_err(|e| format!("read response bytes failed: {e}"))
+}
+
+fn resolve_remote_preview_cache_dir() -> Result<PathBuf, String> {
+    let home_dir = home_path()?;
+    let dir = home_dir.join("Library/Caches/export-wechat-emoji/album-remote-preview");
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create remote preview cache dir: {e}"))?;
+    Ok(dir)
+}
+
+fn ensure_remote_member_preview_file(
+    client: &Client,
+    package_id: &str,
+    member: &EmoticonAlbumMemberRow,
+) -> Result<Option<PathBuf>, String> {
+    let Some(encrypt_url) = member.encrypt_url.as_deref() else {
+        return Ok(None);
+    };
+    let Some(aes_key_hex) = member.aes_key_hex.as_deref() else {
+        return Ok(None);
+    };
+    let Some(key) = normalize_16_byte_hex(aes_key_hex) else {
+        return Ok(None);
+    };
+
+    let cache_dir = resolve_remote_preview_cache_dir()?;
+    let cache_prefix = format!("{}-{}", package_id, member.md5);
+    let existing = ["gif", "png", "jpg", "webp"]
+        .iter()
+        .map(|ext| cache_dir.join(format!("{cache_prefix}.{ext}")))
+        .find(|path| path.exists());
+    if let Some(path) = existing {
+        return Ok(Some(path));
+    }
+
+    let encrypted = download_bytes(client, encrypt_url)?;
+    let decrypted = decrypt_aes128_cbc_with_self_iv(&encrypted, &key)?;
+    let Some(ext) = detect_image_extension(&decrypted) else {
+        return Ok(None);
+    };
+
+    let out_path = cache_dir.join(format!("{cache_prefix}.{ext}"));
+    fs::write(&out_path, &decrypted)
+        .map_err(|e| format!("failed to write remote preview cache {}: {e}", out_path.display()))?;
+    Ok(Some(out_path))
+}
+
+fn collect_package_name_map_from_conn(
+    conn: &Connection,
+    package_ids: &[String],
+) -> Result<HashMap<String, String>, String> {
+    if package_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let columns = query_table_columns(conn, "kStoreEmoticonPackageTable")?;
+    let package_id_col = pick_existing_column(&columns, &["package_id_", "package_id", "packageId"])
+        .ok_or_else(|| "kStoreEmoticonPackageTable missing package id column".to_string())?;
+
+    let mut select_columns = vec![package_id_col.clone()];
+    for candidate in [
+        "package_name_",
+        "package_name",
+        "title_",
+        "title",
+        "name_",
+        "name",
+        "display_name_",
+        "display_name",
+        "label_name_",
+        "label_name",
+        "desc_",
+        "desc",
+        "summary_",
+        "summary",
+    ] {
+        if columns.contains(candidate) {
+            select_columns.push(candidate.to_string());
+        }
+    }
+
+    let sql = format!(
+        "SELECT {} FROM kStoreEmoticonPackageTable WHERE {} IN ({})",
+        select_columns.join(", "),
+        package_id_col,
+        build_sql_in_list(package_ids)
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare kStoreEmoticonPackageTable: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let package_id = row.get::<_, String>(0)?;
+            let mut values = Vec::<Option<String>>::new();
+            for index in 1..select_columns.len() {
+                values.push(row.get::<_, Option<String>>(index)?);
+            }
+            Ok((package_id, values))
+        })
+        .map_err(|e| format!("query kStoreEmoticonPackageTable: {e}"))?;
+
+    let mut out = HashMap::<String, String>::new();
+    for row in rows {
+        let (package_id, values) =
+            row.map_err(|e| format!("query kStoreEmoticonPackageTable: {e}"))?;
+        let normalized_package_id = package_id.trim().to_string();
+        if normalized_package_id.is_empty() {
+            continue;
+        }
+        if let Some(name) = pick_readable_package_name(&values, &normalized_package_id) {
+            out.insert(normalized_package_id, name);
+        }
+    }
+
+    Ok(out)
+}
+
+fn normalize_file_uri_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let encoded = text.replace('#', "%23").replace(' ', "%20");
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    }
+}
+
+fn detect_embedded_image_slice(data: &[u8]) -> Option<(usize, usize, &'static str)> {
+    let mut best: Option<(usize, usize, &'static str)> = None;
+    let len = data.len();
+    let mut index = 0usize;
+    while index < len {
+        if index + 3 <= len && data[index..].starts_with(&[0xff, 0xd8, 0xff]) {
+            let mut end = None;
+            let mut pos = index + 2;
+            while pos + 1 < len {
+                if data[pos] == 0xff && data[pos + 1] == 0xd9 {
+                    end = Some(pos + 2);
+                    break;
+                }
+                pos += 1;
+            }
+            if let Some(image_end) = end {
+                let candidate = (index, image_end, "jpg");
+                if best.map(|(start, _, _)| index < start).unwrap_or(true) {
+                    best = Some(candidate);
+                }
+                index = image_end;
+                continue;
+            }
+        }
+        if index + 6 <= len && (&data[index..index + 6] == b"GIF87a" || &data[index..index + 6] == b"GIF89a") {
+            let mut end = None;
+            let mut pos = index + 6;
+            while pos + 1 < len {
+                if data[pos] == 0x3b {
+                    end = Some(pos + 1);
+                    break;
+                }
+                pos += 1;
+            }
+            if let Some(image_end) = end {
+                let candidate = (index, image_end, "gif");
+                if best.map(|(start, _, _)| index < start).unwrap_or(true) {
+                    best = Some(candidate);
+                }
+                index = image_end;
+                continue;
+            }
+        }
+        if index + 8 <= len && &data[index..index + 8] == b"\x89PNG\r\n\x1a\n" {
+            let mut pos = index + 8;
+            let mut end = None;
+            while pos + 8 <= len {
+                let chunk_len = u32::from_be_bytes([
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                ]) as usize;
+                if pos + 12 + chunk_len > len {
+                    break;
+                }
+                let chunk_type = &data[pos + 4..pos + 8];
+                pos += 12 + chunk_len;
+                if chunk_type == b"IEND" {
+                    end = Some(pos);
+                    break;
+                }
+            }
+            if let Some(image_end) = end {
+                let candidate = (index, image_end, "png");
+                if best.map(|(start, _, _)| index < start).unwrap_or(true) {
+                    best = Some(candidate);
+                }
+                index = image_end;
+                continue;
+            }
+        }
+        if index + 12 <= len && &data[index..index + 4] == b"RIFF" && &data[index + 8..index + 12] == b"WEBP" {
+            let chunk_len = u32::from_le_bytes([
+                data[index + 4],
+                data[index + 5],
+                data[index + 6],
+                data[index + 7],
+            ]) as usize;
+            let image_end = index.saturating_add(8 + chunk_len);
+            if image_end <= len {
+                let candidate = (index, image_end, "webp");
+                if best.map(|(start, _, _)| index < start).unwrap_or(true) {
+                    best = Some(candidate);
+                }
+                index = image_end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    best
+}
+
+fn resolve_preview_cache_dir() -> Result<PathBuf, String> {
+    let home_dir = home_path()?;
+    let dir = home_dir.join("Library/Caches/export-wechat-emoji/favorite-stickers");
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create preview cache dir: {e}"))?;
+    Ok(dir)
+}
+
+fn extract_local_preview_file(source_path: &Path, cache_key: &str) -> Result<Option<PathBuf>, String> {
+    if !source_path.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read(source_path)
+        .map_err(|e| format!("failed to read local sticker source {}: {e}", source_path.display()))?;
+    let Some((start, end, ext)) = detect_embedded_image_slice(&data) else {
+        return Ok(None);
+    };
+
+    let cache_dir = resolve_preview_cache_dir()?;
+    let out_path = cache_dir.join(format!("{cache_key}.{ext}"));
+    if !out_path.exists() {
+        fs::write(&out_path, &data[start..end])
+            .map_err(|e| format!("failed to write preview cache {}: {e}", out_path.display()))?;
+    }
+    Ok(Some(out_path))
+}
+
+#[cfg(target_os = "macos")]
+fn find_persistence_path(sticker_root: &Path, md5: &str) -> Option<PathBuf> {
+    let path = sticker_root.join("Persistence").join(md5);
+    path.exists().then_some(path)
+}
+
+#[cfg(target_os = "macos")]
+fn find_thumb_path(sticker_root: &Path, md5: &str) -> Option<PathBuf> {
+    let path = sticker_root.join("Thumbs").join(format!("{md5}.thumb"));
+    path.exists().then_some(path)
+}
+
+#[cfg(target_os = "macos")]
+fn build_local_preview_maps(
+    sticker_root: &Path,
+    package_ids: &[String],
+    album_member_map: &HashMap<String, Vec<EmoticonAlbumMemberRow>>,
+) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
+    let mut preview_map = HashMap::<String, String>::new();
+    let mut source_map = HashMap::<String, String>::new();
+
+    for package_id in package_ids {
+        let Some(members) = album_member_map.get(package_id) else { continue };
+        for member in members {
+            if preview_map.contains_key(&member.md5) {
+                continue;
+            }
+
+            let persistence_path = find_persistence_path(sticker_root, &member.md5);
+            let thumb_path = find_thumb_path(sticker_root, &member.md5);
+            let cache_key = format!("{}-{}", package_id, member.md5);
+
+            let mut preview_path: Option<String> = None;
+            let mut preview_source_path: Option<PathBuf> = None;
+
+            if let Some(path) = persistence_path.as_ref() {
+                preview_path = extract_local_preview_file(path, &format!("{cache_key}-p"))?
+                    .map(|value| normalize_file_uri_path(&value));
+                if preview_path.is_some() {
+                    preview_source_path = Some(path.clone());
+                }
+            }
+
+            if preview_path.is_none() {
+                if let Some(path) = thumb_path.as_ref() {
+                    preview_path = extract_local_preview_file(path, &format!("{cache_key}-t"))?
+                        .map(|value| normalize_file_uri_path(&value));
+                    if preview_path.is_some() {
+                        preview_source_path = Some(path.clone());
+                    }
+                }
+            }
+
+            if let Some(preview_path) = preview_path {
+                preview_map.insert(member.md5.clone(), preview_path);
+            }
+
+            if let Some(source_path) = preview_source_path
+                .or(persistence_path.clone())
+                .or(thumb_path.clone())
+            {
+                source_map.insert(member.md5.clone(), normalize_file_uri_path(&source_path));
+            }
+        }
+    }
+
+    Ok((preview_map, source_map))
+}
+
+fn collect_album_members_from_conn(
+    conn: &Connection,
+    package_ids: &[String],
+    non_store_meta_map: &HashMap<String, NonStoreMemberMeta>,
+) -> Result<HashMap<String, Vec<EmoticonAlbumMemberRow>>, String> {
+    if package_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let columns = query_table_columns(conn, "kStoreEmoticonFilesTable")?;
+    let package_id_col = pick_existing_column(&columns, &["package_id_", "package_id", "packageId"])
+        .ok_or_else(|| "kStoreEmoticonFilesTable missing package id column".to_string())?;
+    let md5_col = pick_existing_column(&columns, &["md5_", "md5"])
+        .ok_or_else(|| "kStoreEmoticonFilesTable missing md5 column".to_string())?;
+    let sort_order_col = pick_existing_column(&columns, &["sort_order_", "sort_order"])
+        .unwrap_or_else(|| "rowid".to_string());
+
+    let store_url_columns: Vec<String> = ["cdn_url_", "cdn_url", "url_", "url", "thumb_url_", "thumb_url"]
+        .iter()
+        .filter(|candidate| columns.contains(**candidate))
+        .map(|candidate| (*candidate).to_string())
+        .collect();
+
+    let mut select_columns = vec![package_id_col.clone(), md5_col.clone(), sort_order_col.clone()];
+    select_columns.extend(store_url_columns.iter().cloned());
+
+    let sql = format!(
+        "SELECT {} \
+         FROM kStoreEmoticonFilesTable \
+         WHERE {package_id_col} IN ({}) \
+         ORDER BY {package_id_col} ASC, {sort_order_col} ASC, {md5_col} ASC",
+        select_columns.join(", "),
+        build_sql_in_list(package_ids)
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare kStoreEmoticonFilesTable: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let package_id = row.get::<_, String>(0)?;
+            let md5 = row.get::<_, String>(1)?;
+            let sort_order = row.get::<_, i64>(2).unwrap_or(i64::MAX);
+            let mut url_fields = Vec::<Option<String>>::new();
+            for index in 0..store_url_columns.len() {
+                url_fields.push(row.get::<_, Option<String>>(3 + index)?);
+            }
+            Ok((package_id, md5, sort_order, url_fields))
+        })
+        .map_err(|e| format!("query kStoreEmoticonFilesTable: {e}"))?;
+
+    let mut out = HashMap::<String, Vec<EmoticonAlbumMemberRow>>::new();
+    for row in rows {
+        let (package_id, md5, sort_order, url_fields) =
+            row.map_err(|e| format!("query kStoreEmoticonFilesTable: {e}"))?;
+        let normalized_package_id = package_id.trim().to_string();
+        let normalized_md5 = md5.trim().to_ascii_lowercase();
+        if normalized_package_id.is_empty() || normalized_md5.is_empty() {
+            continue;
+        }
+
+        let list = out.entry(normalized_package_id).or_insert_with(Vec::new);
+        if list.iter().any(|item| item.md5 == normalized_md5) {
+            continue;
+        }
+
+        let store_url = best_emoticon_url_from_fields(&url_fields);
+        let non_store_meta = non_store_meta_map.get(&normalized_md5).cloned().unwrap_or_default();
+        list.push(EmoticonAlbumMemberRow {
+            md5: normalized_md5.clone(),
+            sort_order,
+            download_url: store_url.or(non_store_meta.download_url.clone()),
+            encrypt_url: non_store_meta.encrypt_url,
+            aes_key_hex: non_store_meta.aes_key_hex,
+            preview_path: None,
+            local_source_path: None,
+        });
+    }
+
+    Ok(out)
+}
+
+#[cfg(target_os = "macos")]
+fn find_v4_emoticon_db_for_wxid(wxid_dir: &str) -> Result<PathBuf, String> {
+    let home_dir = home_path()?;
+    let db = home_dir
+        .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+        .join(wxid_dir)
+        .join("db_storage/emoticon/emoticon.db");
+    if !db.exists() {
+        return Err(format!("emoticon.db not found for wxid: {wxid_dir}"));
+    }
+    Ok(db)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_thumb_md5_names_recursive(dir: &Path, out: &mut HashSet<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            collect_thumb_md5_names_recursive(&path, out);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".thumb") {
+            continue;
+        }
+        let stem = name.trim_end_matches(".thumb").trim().to_ascii_lowercase();
+        if stem.len() == 32 && stem.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.insert(stem);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn collect_v4_thumb_md5_names(home_dir: &Path, wxid_dir: &str) -> HashSet<String> {
+    let thumb_dir = home_dir
+        .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+        .join(wxid_dir)
+        .join("business/emoticon/Thumb");
+    let mut out = HashSet::<String>::new();
+    if thumb_dir.exists() {
+        collect_thumb_md5_names_recursive(&thumb_dir, &mut out);
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn find_legacy_sticker_roots(home_dir: &Path) -> Vec<PathBuf> {
+    let base_dir = home_dir.join(
+        "Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat",
+    );
+    let mut roots = Vec::<PathBuf>::new();
+    let version_dirs = match std::fs::read_dir(base_dir) {
+        Ok(v) => v,
+        Err(_) => return roots,
+    };
+
+    for version_entry in version_dirs.flatten() {
+        let version_file_type = match version_entry.file_type() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !version_file_type.is_dir() {
+            continue;
+        }
+        let version_dir = version_entry.path();
+        let account_dirs = match std::fs::read_dir(&version_dir) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        for account_entry in account_dirs.flatten() {
+            let account_file_type = match account_entry.file_type() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if !account_file_type.is_dir() {
+                continue;
+            }
+            let sticker_root = account_entry.path().join("Stickers");
+            if sticker_root.join("Thumbs").exists() {
+                roots.push(sticker_root);
+            }
+        }
+    }
+
+    roots.sort();
+    roots
+}
+
+#[cfg(target_os = "macos")]
+fn count_overlap_with_v4_thumbs(thumbs_dir: &Path, v4_md5_names: &HashSet<String>) -> usize {
+    let entries = match std::fs::read_dir(thumbs_dir) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+
+    let mut count = 0usize;
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".thumb") {
+            continue;
+        }
+        let stem = name.trim_end_matches(".thumb").trim().to_ascii_lowercase();
+        if stem.len() == 32
+            && stem.chars().all(|c| c.is_ascii_hexdigit())
+            && v4_md5_names.contains(&stem)
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_matching_legacy_sticker_root(
+    home_dir: &Path,
+    wxid_dir: &str,
+) -> Result<Option<MatchedLegacyStickerRoot>, String> {
+    let v4_md5_names = collect_v4_thumb_md5_names(home_dir, wxid_dir);
+    if v4_md5_names.is_empty() {
+        return Ok(None);
+    }
+
+    let mut best_path: Option<PathBuf> = None;
+    let mut best_overlap = 0usize;
+    let mut second_best_overlap = 0usize;
+
+    for sticker_root in find_legacy_sticker_roots(home_dir) {
+        let overlap = count_overlap_with_v4_thumbs(&sticker_root.join("Thumbs"), &v4_md5_names);
+        if overlap > best_overlap {
+            second_best_overlap = best_overlap;
+            best_overlap = overlap;
+            best_path = Some(sticker_root);
+        } else if overlap > second_best_overlap {
+            second_best_overlap = overlap;
+        }
+    }
+
+    let Some(path) = best_path else {
+        return Ok(None);
+    };
+    if best_overlap < 20 {
+        return Ok(None);
+    }
+
+    let strong_match = second_best_overlap == 0 || best_overlap >= second_best_overlap.saturating_mul(5);
+    Ok(Some(MatchedLegacyStickerRoot {
+        path,
+        overlap: best_overlap,
+        second_best_overlap,
+        strong_match,
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn collect_local_package_ids_from_sticker_root(sticker_root: &Path) -> Vec<String> {
+    let thumbs_dir = sticker_root.join("Thumbs");
+    let entries = match std::fs::read_dir(thumbs_dir) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let mut package_ids = HashSet::<String>::new();
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".thumb") {
+            continue;
+        }
+        let package_id = name.trim_end_matches(".thumb").trim();
+        if package_id
+            .to_ascii_lowercase()
+            .starts_with("com.tencent.xin.emoticon.")
+        {
+            package_ids.insert(package_id.to_string());
+        }
+    }
+
+    let mut out: Vec<String> = package_ids.into_iter().collect();
+    out.sort();
+    out
+}
+
+#[tauri::command]
+pub(crate) fn build_emoticon_catalog_v4(
+    wxid_dir: String,
+    db_key: String,
+) -> Result<EmoticonCatalogResult, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (wxid_dir, db_key);
+        return Err("build_emoticon_catalog_v4 is only supported on macOS".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let normalized_wxid = wxid_dir.trim().to_string();
+        if normalized_wxid.is_empty() {
+            return Err("wxid_dir is required".to_string());
+        }
+
+        let key = normalize_hex_key(&db_key)?;
+        let home_dir = home_path()?;
+        let emoticon_db_path = find_v4_emoticon_db_for_wxid(&normalized_wxid)?;
+        let matched_root = resolve_matching_legacy_sticker_root(&home_dir, &normalized_wxid)?;
+
+        let mut result = with_decrypted_emoticon_conn(&emoticon_db_path, &key, |conn| {
+            let favorite_rows = collect_favorite_url_rows_from_conn(conn)?;
+            let favorites = favorite_rows
+                .iter()
+                .map(|item| item.url.clone())
+                .collect::<Vec<String>>();
+
+            let mut warnings = Vec::<String>::new();
+            let local_package_ids = collect_active_package_ids_from_conn(conn)?;
+            let non_store_meta_map = collect_non_store_member_meta_map_from_conn(conn)?;
+            let package_name_map = collect_package_name_map_from_conn(conn, &local_package_ids)?;
+            let mut album_member_map = collect_album_members_from_conn(conn, &local_package_ids, &non_store_meta_map)?;
+
+            let remote_preview_client = Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+                .map_err(|e| format!("failed to build preview http client: {e}"))?;
+
+            let (local_preview_map, local_source_map) = matched_root
+                .as_ref()
+                .map(|matched| build_local_preview_maps(&matched.path, &local_package_ids, &album_member_map))
+                .transpose()?
+                .unwrap_or_default();
+
+            let mut remote_preview_failures = 0usize;
+            for (package_id, members) in album_member_map.iter_mut() {
+                for member in members.iter_mut() {
+                    if let Ok(Some(path)) = ensure_remote_member_preview_file(&remote_preview_client, package_id, member) {
+                        member.preview_path = Some(normalize_file_uri_path(&path));
+                        member.local_source_path = Some(normalize_file_uri_path(&path));
+                        continue;
+                    } else if member.encrypt_url.is_some() && member.aes_key_hex.is_some() {
+                        remote_preview_failures += 1;
+                    }
+
+                    member.preview_path = local_preview_map.get(&member.md5).cloned();
+                    member.local_source_path = local_source_map.get(&member.md5).cloned();
+                }
+            }
+
+            if remote_preview_failures > 0 {
+                warnings.push(format!(
+                    "有 {} 个专辑成员的远端真图恢复失败，已回退到本地可用预览或保留下载地址。",
+                    remote_preview_failures
+                ));
+            }
+
+            let mut unresolved_name_count = 0usize;
+            let mut partial_album_count = 0usize;
+            let mut albums = Vec::<EmoticonAlbumCatalogItem>::new();
+
+            for package_id in &local_package_ids {
+                let mut members = album_member_map.get(package_id).cloned().unwrap_or_default();
+                members.sort_by(|left, right| {
+                    left.sort_order
+                        .cmp(&right.sort_order)
+                        .then_with(|| left.md5.cmp(&right.md5))
+                });
+
+                if members.is_empty() {
+                    partial_album_count += 1;
+                }
+
+                let mut urls = Vec::<String>::new();
+                let mut seen_urls = HashSet::<String>::new();
+                let mut render_items = Vec::<EmoticonRenderItem>::new();
+                let member_refs = members
+                    .iter()
+                    .map(|member| EmoticonAlbumMemberRef {
+                        md5: member.md5.to_ascii_lowercase(),
+                        sort_order: member.sort_order,
+                    })
+                    .collect::<Vec<_>>();
+                for member in &members {
+                    let preview_src = member.preview_path.clone().or_else(|| member.download_url.clone());
+                    let Some(src) = preview_src else { continue };
+
+                    if let Some(download_url) = member.download_url.clone() {
+                        if seen_urls.insert(download_url.clone()) {
+                            urls.push(download_url);
+                        }
+                    }
+
+                    render_items.push(EmoticonRenderItem {
+                        id: format!("{}:{}", package_id, member.md5),
+                        md5: member.md5.clone(),
+                        src,
+                        download_url: member.download_url.clone(),
+                        local_source_path: member.local_source_path.clone(),
+                    });
+                }
+
+                if !members.is_empty() && render_items.len() < members.len() {
+                    partial_album_count += 1;
+                }
+
+                let name = match package_name_map.get(package_id) {
+                    Some(name) => name.clone(),
+                    None => {
+                        unresolved_name_count += 1;
+                        package_id.clone()
+                    }
+                };
+
+                let icon = render_items
+                    .first()
+                    .map(|item| item.src.clone())
+                    .or_else(|| urls.first().cloned());
+
+                albums.push(EmoticonAlbumCatalogItem {
+                    id: package_id.clone(),
+                    name,
+                    count: members.len(),
+                    icon,
+                    urls,
+                    items: render_items,
+                    members: member_refs,
+                    package_id: package_id.clone(),
+                });
+            }
+
+            albums.sort_by(|left, right| {
+                right
+                    .count
+                    .cmp(&left.count)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+
+            if let Some(matched) = &matched_root {
+                if !matched.strong_match {
+                    warnings.push(format!(
+                        "已匹配到疑似专辑缓存目录，但账号映射存在歧义（交集 {}，次优 {}），专辑结果可能不完整。",
+                        matched.overlap, matched.second_best_overlap
+                    ));
+                }
+            }
+
+            if unresolved_name_count > 0 {
+                warnings.push(format!(
+                    "有 {} 个专辑未恢复出可读名称，已回退显示 packageId。",
+                    unresolved_name_count
+                ));
+            }
+
+            if partial_album_count > 0 {
+                warnings.push(format!(
+                    "有 {} 个专辑包含暂不可预览或不可导出的成员，已按可用资源继续展示。",
+                    partial_album_count
+                ));
+            }
+
+            let mode = if !albums.is_empty() {
+                if warnings.is_empty() {
+                    "full".to_string()
+                } else {
+                    "partial".to_string()
+                }
+            } else if !favorites.is_empty() {
+                "favorites_only".to_string()
+            } else {
+                "unavailable".to_string()
+            };
+
+            Ok(EmoticonCatalogResult {
+                mode,
+                warnings,
+                favorites,
+                albums,
+            })
+        })?;
+
+        if matched_root.is_none() {
+            result.warnings.push(
+                "未能匹配当前账号的本地专辑缓存目录，已回退为个人收藏导出模式。"
+                    .to_string(),
+            );
+            if result.mode == "full" {
+                result.mode = "partial".to_string();
+            } else if result.mode == "unavailable" {
+                result.mode = "favorites_only".to_string();
+            }
+        } else if result.albums.is_empty() && !result.favorites.is_empty() {
+            result.warnings.push(
+                "当前账号未识别到已添加的表情专辑，已切换为个人收藏导出模式。"
+                    .to_string(),
+            );
+            result.mode = "favorites_only".to_string();
+        }
+
+        if result.albums.is_empty() && result.favorites.is_empty() {
+            result.mode = "unavailable".to_string();
+            if result.warnings.is_empty() {
+                result.warnings.push(
+                    "未恢复出可读取的表情收藏或专辑数据，请确认微信版本与本地目录结构。"
+                        .to_string(),
+                );
+            }
+        }
+
+        Ok(result)
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AutoDumpUrlsResult {
@@ -476,6 +1724,14 @@ struct WeChatEnvironmentDiag {
     v4_data_dir: PathAccessStatus,
     legacy_data_dir: PathAccessStatus,
     default_wechat_app: PathAccessStatus,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WeChatCurrentAccountProfile {
+    wxid: Option<String>,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -539,6 +1795,142 @@ fn path_access_status(path: PathBuf, expect_dir: bool) -> PathAccessStatus {
             readable: false,
             error: Some(e.to_string()),
         },
+    }
+}
+
+fn read_varint(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
+    let mut value = 0usize;
+    let mut length = 0usize;
+    let mut shift = 0usize;
+    let mut cursor = offset;
+
+    while cursor < buf.len() && shift < (usize::BITS as usize) {
+        let byte = buf[cursor];
+        cursor += 1;
+        value |= ((byte & 0x7f) as usize) << shift;
+        length += 1;
+        if (byte & 0x80) == 0 {
+            return Some((value, length));
+        }
+        shift += 7;
+    }
+
+    None
+}
+
+fn extract_mmkv_string(buf: &[u8], key_name: &str) -> Option<String> {
+    let key = key_name.as_bytes();
+    let idx = buf.windows(key.len()).position(|window| window == key)?;
+
+    let mut offset = idx + key.len();
+    let (_first, first_len) = read_varint(buf, offset)?;
+    offset += first_len;
+    let (value_len, second_len) = read_varint(buf, offset)?;
+    offset += second_len;
+
+    if value_len == 0 || value_len > 10_000 || offset + value_len > buf.len() {
+        return None;
+    }
+
+    let value = std::str::from_utf8(&buf[offset..offset + value_len]).ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    Some(value.to_string())
+}
+
+fn fallback_extract_http_url(buf: &[u8]) -> Option<String> {
+    let http_positions = [b"https://".as_slice(), b"http://".as_slice()];
+    let start = http_positions
+        .iter()
+        .find_map(|needle| buf.windows(needle.len()).position(|window| window == *needle))?;
+
+    let end = buf[start..]
+        .iter()
+        .position(|b| *b == 0)
+        .map(|i| start + i)
+        .unwrap_or(buf.len());
+
+    let value = std::str::from_utf8(&buf[start..end]).ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn decrypt_aes128_cfb_in_place(buf: &mut [u8], key: &[u8; 16], iv: &[u8; 16]) {
+    let cipher = Aes128::new_from_slice(key).expect("aes-128 key length must be 16 bytes");
+    let mut feedback = *iv;
+
+    for chunk in buf.chunks_mut(16) {
+        let ciphertext = chunk.to_vec();
+        let mut keystream = feedback.into();
+        cipher.encrypt_block(&mut keystream);
+
+        for (index, byte) in chunk.iter_mut().enumerate() {
+            *byte ^= keystream[index];
+        }
+
+        if ciphertext.len() == 16 {
+            feedback.copy_from_slice(&ciphertext);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parse_wechat_current_account_profile() -> Result<Option<WeChatCurrentAccountProfile>, String> {
+    let home_dir = home_path()?;
+    let config_path = home_dir.join(
+        "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/all_users/config/global_config",
+    );
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let full_data = std::fs::read(&config_path)
+        .map_err(|e| format!("failed to read {}: {e}", config_path.display()))?;
+    if full_data.len() <= 4 {
+        return Ok(None);
+    }
+
+    let mut decrypted = full_data[4..].to_vec();
+
+    let mut key = [0u8; 16];
+    let hardcoded = b"xwechat_crypt_key";
+    let copy_len = key.len().min(hardcoded.len());
+    key[..copy_len].copy_from_slice(&hardcoded[..copy_len]);
+    let iv = [0u8; 16];
+
+    decrypt_aes128_cfb_in_place(&mut decrypted, &key, &iv);
+
+    let wxid = extract_mmkv_string(&decrypted, "mmkv_key_user_name");
+    let display_name = extract_mmkv_string(&decrypted, "mmkv_key_nick_name");
+    let avatar_url = extract_mmkv_string(&decrypted, "mmkv_key_head_img_url")
+        .or_else(|| fallback_extract_http_url(&decrypted));
+
+    if wxid.is_none() && display_name.is_none() && avatar_url.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(WeChatCurrentAccountProfile {
+        wxid,
+        display_name,
+        avatar_url,
+    }))
+}
+
+#[tauri::command]
+fn read_current_wechat_account_profile() -> Result<Option<WeChatCurrentAccountProfile>, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        parse_wechat_current_account_profile()
     }
 }
 
@@ -1281,8 +2673,12 @@ fn main() {
             file_mtime_ms,
             check_wechat_running,
             diagnose_wechat_environment,
+            read_current_wechat_account_profile,
             extract_fav_urls,
             extract_emoticon_urls_v4,
+            build_emoticon_catalog_v4,
+            stickerhub::read_stickerhub_album_cache,
+            stickerhub::refresh_stickerhub_album,
             auto_dump_emoticon_urls_v4
         ])
         .run(tauri::generate_context!())

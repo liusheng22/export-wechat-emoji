@@ -1,17 +1,87 @@
 export function getStodownloadCandidates(url: string): Array<string> {
-  // WeChat sticker URLs are often `.../stodownload?...`. Some resources require a correct
-  // suffix (jpg/gif/png/webp) to be served/rendered, so we try multiple variants.
+  // Some Tencent sticker hosts expose the same resource over only one scheme and
+  // omit the file extension. Try the wxapp HTTP endpoint, both schemes, and
+  // common image suffixes.
   const exts = ['gif', 'jpg', 'png', 'webp'] as const
 
   if (!url.includes('/stodownload')) {
     return [url]
   }
 
-  const replaceExt = (ext: (typeof exts)[number]) =>
-    url.replace(/\/stodownload(?:\.[a-z0-9]+)?\?/i, `/stodownload.${ext}?`)
+  const schemeCandidates: string[] = []
+  try {
+    const original = new URL(url)
+    const hosts =
+      original.hostname === 'vweixinf.tc.qq.com'
+        ? ['wxapp.tc.qq.com', 'vweixinf.tc.qq.com']
+        : original.hostname === 'wxapp.tc.qq.com'
+          ? ['wxapp.tc.qq.com']
+          : []
 
-  const candidates = [url, ...exts.map(replaceExt)]
+    if (hosts.length) {
+      for (const hostname of hosts) {
+        const httpUrl = new URL(original)
+        httpUrl.protocol = 'http:'
+        httpUrl.hostname = hostname
+        schemeCandidates.push(httpUrl.toString())
+
+        if (original.protocol === 'https:') {
+          const httpsUrl = new URL(original)
+          httpsUrl.protocol = 'https:'
+          httpsUrl.hostname = hostname
+          schemeCandidates.push(httpsUrl.toString())
+        }
+      }
+    } else {
+      schemeCandidates.push(url)
+    }
+  } catch {
+    // Keep the original URL when it is not a valid absolute URL.
+    schemeCandidates.push(url)
+  }
+
+  const candidates = schemeCandidates.flatMap((candidate) => {
+    const replaceExt = (ext: (typeof exts)[number]) =>
+      candidate.replace(
+        /\/stodownload(?:\.[a-z0-9]+)?\?/i,
+        `/stodownload.${ext}?`
+      )
+    return [candidate, ...exts.map(replaceExt)]
+  })
   return Array.from(new Set(candidates))
+}
+
+export function getBrowserPreviewSrc(url: string | undefined): string {
+  const normalizedUrl = String(url || '').trim()
+  if (!normalizedUrl) {
+    return ''
+  }
+
+  try {
+    const parsed = new URL(normalizedUrl)
+    if (
+      parsed.hostname === 'vweixinf.tc.qq.com' &&
+      parsed.pathname.includes('/stodownload')
+    ) {
+      return getStodownloadCandidates(normalizedUrl)[0] || normalizedUrl
+    }
+  } catch {
+    return normalizedUrl
+  }
+
+  return normalizedUrl
+}
+
+export function shouldHydrateRemoteImage(url: string | undefined): boolean {
+  if (!url) {
+    return false
+  }
+  try {
+    const parsed = new URL(url)
+    return parsed.hostname === 'mmbiz.qpic.cn'
+  } catch {
+    return false
+  }
 }
 
 export function extFromContentType(
@@ -46,8 +116,8 @@ export function extFromBytes(
     raw instanceof Uint8Array
       ? raw
       : raw instanceof ArrayBuffer
-      ? new Uint8Array(raw)
-      : new Uint8Array(Array.from(raw))
+        ? new Uint8Array(raw)
+        : new Uint8Array(Array.from(raw))
 
   if (
     bytes.length >= 6 &&

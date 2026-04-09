@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import {
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -10,7 +11,14 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
-const mocks = vi.hoisted(() => ({
+const mocks = vi.hoisted(() => {
+  const emailFeedbackPostMock = vi.fn(async (..._args: unknown[]) => ({
+    ok: true,
+    status: 200,
+    data: { schemaVersion: 1, status: 'accepted' }
+  }))
+
+  return {
   messageMock: vi.fn(async () => {}),
   openDialogMock: vi.fn(async () => null),
   listenMock: vi.fn(async () => () => {}),
@@ -32,11 +40,14 @@ const mocks = vi.hoisted(() => ({
     async () => '/Users/tester/Library/Application Support/me.lius.wxemoticon'
   ),
   commandExecuteMock: vi.fn(async () => ({})),
+  emailFeedbackPostMock,
   getClientMock: vi.fn(async () => ({
-    get: vi.fn()
+    get: vi.fn(),
+    post: emailFeedbackPostMock
   })),
   findEmojiTargetsWithMetaMock: vi.fn(),
   autoDumpEmoticonUrlsV4Mock: vi.fn(),
+  buildEmoticonCatalogV4Mock: vi.fn(),
   extractFavUrlsMock: vi.fn(),
   fetchBinaryWithFallbackMock: vi.fn(),
   ensureExportRootDirMock: vi.fn(async () => {}),
@@ -49,8 +60,14 @@ const mocks = vi.hoisted(() => ({
   exportOneEmojiMock: vi.fn(async () => {}),
   openExportDirMock: vi.fn(async () => {}),
   checkWeChatRunningMock: vi.fn(),
-  diagnoseWeChatEnvironmentMock: vi.fn()
-}))
+  diagnoseWeChatEnvironmentMock: vi.fn(),
+  readCurrentWeChatAccountProfileMock: vi.fn(async () => null),
+  readStickerHubAlbumCacheMock: vi.fn(),
+  refreshStickerHubAlbumMock: vi.fn(),
+  createObjectUrlMock: vi.fn(() => 'blob:stickerhub-preview'),
+  revokeObjectUrlMock: vi.fn()
+  }
+})
 
 vi.mock('@tauri-apps/api/dialog', () => ({
   message: mocks.messageMock,
@@ -98,8 +115,12 @@ vi.mock('@tauri-apps/api/shell', () => ({
 }))
 
 vi.mock('@tauri-apps/api/http', () => ({
+  Body: {
+    json: (value: unknown) => ({ type: 'Json', value })
+  },
   ResponseType: {
-    Binary: 3
+    Binary: 3,
+    JSON: 1
   },
   getClient: mocks.getClientMock
 }))
@@ -117,6 +138,7 @@ vi.mock('./services/archive', async () => {
   return {
     ...actual,
     autoDumpEmoticonUrlsV4: mocks.autoDumpEmoticonUrlsV4Mock,
+    buildEmoticonCatalogV4: mocks.buildEmoticonCatalogV4Mock,
     extractFavUrls: mocks.extractFavUrlsMock
   }
 })
@@ -124,6 +146,17 @@ vi.mock('./services/archive', async () => {
 vi.mock('./services/downloader', () => ({
   fetchBinaryWithFallback: mocks.fetchBinaryWithFallbackMock
 }))
+
+vi.mock('./services/stickerhub', async () => {
+  const actual = await vi.importActual<typeof import('./services/stickerhub')>(
+    './services/stickerhub'
+  )
+  return {
+    ...actual,
+    readStickerHubAlbumCache: mocks.readStickerHubAlbumCacheMock,
+    refreshStickerHubAlbum: mocks.refreshStickerHubAlbumMock
+  }
+})
 
 vi.mock('./services/exporter', async () => {
   const actual = await vi.importActual<typeof import('./services/exporter')>(
@@ -144,6 +177,7 @@ vi.mock('./services/exporter', async () => {
 vi.mock('./services/system', () => ({
   checkWeChatRunning: mocks.checkWeChatRunningMock,
   diagnoseWeChatEnvironment: mocks.diagnoseWeChatEnvironmentMock,
+  readCurrentWeChatAccountProfile: mocks.readCurrentWeChatAccountProfileMock,
   fileMtimeMs: vi.fn(async () => null)
 }))
 
@@ -184,6 +218,15 @@ function makeV4Target(wxid = 'wxid_test_123'): V4Target {
   }
 }
 
+function makeFavoritesCatalog(urls: string[]) {
+  return {
+    mode: 'favorites_only' as const,
+    warnings: [],
+    favorites: urls,
+    albums: []
+  }
+}
+
 function setExistsBehavior(options?: {
   wechatApp?: boolean
   cachedKey?: boolean
@@ -204,15 +247,33 @@ function setExistsBehavior(options?: {
 async function renderApp() {
   const user = userEvent.setup()
   render(<App />)
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: '一键获取并预览' })).toBeEnabled()
-  )
+  await screen.findByRole('button', { name: '获取并预览' })
   return { user }
+}
+
+async function waitForPreviewActionEnabled() {
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: '获取并预览' })).toBeEnabled()
+  )
+}
+
+async function expectPreviewImages(count: number) {
+  await waitFor(() =>
+    expect(screen.getAllByAltText('emoji')).toHaveLength(count)
+  )
 }
 
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  Object.defineProperty(URL, 'createObjectURL', {
+    configurable: true,
+    value: mocks.createObjectUrlMock
+  })
+  Object.defineProperty(URL, 'revokeObjectURL', {
+    configurable: true,
+    value: mocks.revokeObjectUrlMock
+  })
 
   mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([])
   mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
@@ -223,7 +284,20 @@ beforeEach(() => {
     logFile: '/tmp/emoticon_urls.log',
     urls: []
   })
+  mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+    makeFavoritesCatalog([])
+  )
   mocks.extractFavUrlsMock.mockResolvedValue([])
+  mocks.readStickerHubAlbumCacheMock.mockResolvedValue({
+    status: 'missing',
+    payload: null,
+    etag: null
+  })
+  mocks.refreshStickerHubAlbumMock.mockResolvedValue({
+    status: 'not_found',
+    payload: null,
+    retryAfterSeconds: null
+  })
   mocks.fetchBinaryWithFallbackMock.mockResolvedValue({
     ok: true,
     buffer: new Uint8Array([71, 73, 70, 56]).buffer,
@@ -280,18 +354,13 @@ describe('App GUI flow', () => {
       }
     })
 
-    const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    await renderApp()
 
-    await waitFor(() =>
-      expect(mocks.messageMock).toHaveBeenCalledWith(
-        expect.stringContaining('完全磁盘访问权限'),
-        expect.objectContaining({ type: 'warning' })
-      )
-    )
     expect(
-      await screen.findAllByText(/无法读取微信数据目录：.*完全磁盘访问权限/)
+      await screen.findAllByText(/无法读取微信数据.*完全磁盘访问权限/)
     ).not.toHaveLength(0)
+    expect(screen.getByRole('button', { name: '获取并预览' })).toBeDisabled()
+    expect(mocks.messageMock).not.toHaveBeenCalled()
   })
 
   it('shows an explicit warning when WeChat is still running', async () => {
@@ -305,10 +374,11 @@ describe('App GUI flow', () => {
     setExistsBehavior({ wechatApp: true, cachedKey: false })
 
     const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
 
     expect(
-      await screen.findByText(/必须先完全退出微信才能继续下一步/)
+      await screen.findByText(/必须先完全退出微信才能继续/)
     ).toBeInTheDocument()
     expect(
       await screen.findByText('必须先完全退出微信，才能继续获取表情数据。')
@@ -320,11 +390,12 @@ describe('App GUI flow', () => {
     setExistsBehavior({ wechatApp: false, cachedKey: false })
 
     const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
 
     expect(
       await screen.findAllByText(
-        /未找到 WeChat\.app。请在「高级选项」里选择正确的 WeChat\.app 路径后重试。/
+        /未找到微信应用。请在“设置”中重新选择安装位置。/
       )
     ).not.toHaveLength(0)
   })
@@ -342,16 +413,52 @@ describe('App GUI flow', () => {
         'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
       ]
     })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+      makeFavoritesCatalog([
+        'https://wxapp.tc.qq.com/1/stodownload?m=first&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
+      ])
+    )
     setExistsBehavior({ wechatApp: true, cachedKey: false })
 
     const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
 
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    await expectPreviewImages(2)
+    expect(screen.getByRole('button', { name: '导出全部' })).toBeInTheDocument()
     expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledWith(
       'wxid_test_123',
       '/Applications/WeChat.app'
     )
+  })
+
+  it('does not leave mmbiz previews in a permanent loading state', async () => {
+    const mmbizUrls = [
+      'https://mmbiz.qpic.cn/mmemoticon/Q3auHgzwzM4A2oaOBRow3TTumt85IY8vux1aCfqKxg8xzkoGDQpAV02hLiccfl0BE/0',
+      'https://mmbiz.qpic.cn/mmemoticon/ajNVdqHZLLDNuP3ULtMbeppHbom5AGuKes2gkGKHNKvicQ7iaoC9f1rs0vlXOjxkibe/0',
+      'https://mmbiz.qpic.cn/mmemoticon/ajNVdqHZLLA4XqclcticIpDZqf3ibzf7HD1f2d43GSHQYYueEic6aEcPruUmePv9MR4/0'
+    ]
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'mmbiz'.repeat(16),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: mmbizUrls
+    })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+      makeFavoritesCatalog(mmbizUrls)
+    )
+    setExistsBehavior({ wechatApp: true, cachedKey: false })
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+
+    await expectPreviewImages(3)
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(3)
   })
 
   it('auto-selects the single account and skips quit check when cached db key exists', async () => {
@@ -368,20 +475,574 @@ describe('App GUI flow', () => {
       logFile: '/tmp/emoticon_urls.log',
       urls: ['https://wxapp.tc.qq.com/1/stodownload?m=cached&filekey=1']
     })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+      makeFavoritesCatalog([
+        'https://wxapp.tc.qq.com/1/stodownload?m=cached&filekey=1'
+      ])
+    )
     setExistsBehavior({ wechatApp: true, cachedKey: true })
 
     const { user } = await renderApp()
 
-    expect(await screen.findByDisplayValue(/wxid_test_123/)).toBeInTheDocument()
-    expect(screen.queryByLabelText('选择账号')).not.toBeInTheDocument()
+    await waitForPreviewActionEnabled()
+    expect(screen.getByRole('combobox')).toHaveTextContent('wxid_test_123')
+    expect(screen.queryByText('选择账号')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
 
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    await expectPreviewImages(1)
     expect(mocks.checkWeChatRunningMock).not.toHaveBeenCalled()
     expect(
-      screen.queryByText(/必须先完全退出微信才能继续下一步/)
+      screen.queryByText(/必须先完全退出微信才能继续/)
     ).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新微信账号' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '刷新账号' })).not.toBeInTheDocument()
+  })
+
+  it('loads a complete album from the API only after it is selected', async () => {
+    const productId = 'com.tencent.xin.emoticon.person.complete_album'
+    const md5 = '99999999999999999999999999999999'
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'album'.repeat(16),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: [
+        'https://wxapp.tc.qq.com/1/stodownload?m=fav1&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=fav2&filekey=2'
+      ]
+    })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
+      mode: 'full',
+      warnings: [],
+      favorites: [
+        'https://wxapp.tc.qq.com/1/stodownload?m=fav1&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=fav2&filekey=2'
+      ],
+      albums: [
+        {
+          id: productId,
+          name: '搞怪专辑',
+          count: 1,
+          urls: ['https://wxapp.tc.qq.com/1/stodownload?m=album1&filekey=3'],
+          items: [
+            {
+              id: `${productId}:${md5}`,
+              md5,
+              src: 'https://wxapp.tc.qq.com/1/stodownload?m=album1&filekey=3',
+              downloadUrl:
+                'https://wxapp.tc.qq.com/1/stodownload?m=album1&filekey=3'
+            }
+          ],
+          members: [{ md5, sortOrder: 1 }],
+          packageId: productId
+        }
+      ]
+    })
+    mocks.refreshStickerHubAlbumMock.mockResolvedValue({
+      status: 'ready',
+      retryAfterSeconds: null,
+      payload: {
+        schemaVersion: 1,
+        productId,
+        iconUrl: null,
+        version: null,
+        members: [
+          {
+            memberIndex: 1,
+            md5,
+            previewUrl: 'https://remote.example/album-preview.gif',
+            downloadUrl: 'https://remote.example/album-full.gif'
+          }
+        ]
+      }
+    })
+    setExistsBehavior({ wechatApp: true, cachedKey: false })
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+
+    await expectPreviewImages(2)
+    expect(mocks.readStickerHubAlbumCacheMock).not.toHaveBeenCalled()
+    expect(mocks.refreshStickerHubAlbumMock).not.toHaveBeenCalled()
+
+    await user.click(screen.getByText('搞怪专辑'))
+    await expectPreviewImages(1)
+    expect((screen.getByAltText('emoji') as HTMLImageElement).src).toBe(
+      'https://remote.example/album-full.gif'
+    )
+    expect(mocks.refreshStickerHubAlbumMock).toHaveBeenCalledWith(productId)
+  })
+
+  it('uses only API members for a selected album and exports remote resources', async () => {
+    const productId =
+      'com.tencent.xin.emoticon.person.stiker_test_album'
+    const localMd5 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const missingMd5 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'f'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: ['https://favorites.example/favorite.gif']
+    })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
+      mode: 'partial',
+      warnings: [],
+      favorites: ['https://favorites.example/favorite.gif'],
+      albums: [
+        {
+          id: productId,
+          name: '缺图专辑',
+          count: 2,
+          icon: undefined,
+          urls: ['https://local.example/full.gif'],
+          packageId: productId,
+          members: [
+            { md5: missingMd5, sortOrder: 1 },
+            { md5: localMd5.toUpperCase(), sortOrder: 2 }
+          ],
+          items: [
+            {
+              id: `${productId}:${localMd5}`,
+              md5: localMd5,
+              src: 'https://local.example/preview.gif',
+              downloadUrl: 'https://local.example/full.gif'
+            }
+          ]
+        }
+      ]
+    })
+    mocks.refreshStickerHubAlbumMock.mockResolvedValue({
+      status: 'ready',
+      retryAfterSeconds: null,
+      payload: {
+        schemaVersion: 1,
+        productId,
+        iconUrl: 'https://remote.example/icon.png',
+        version: 'opaque',
+        members: [
+          {
+            memberIndex: 1,
+            md5: missingMd5,
+            previewUrl: 'https://remote.example/preview.gif',
+            downloadUrl: 'https://remote.example/full.gif'
+          },
+          {
+            memberIndex: 2,
+            md5: localMd5,
+            previewUrl: 'https://remote.example/must-not-replace.gif',
+            downloadUrl: 'https://remote.example/must-not-export.gif'
+          },
+          {
+            memberIndex: 3,
+            md5: 'cccccccccccccccccccccccccccccccc',
+            previewUrl: 'https://remote.example/extra.gif',
+            downloadUrl: 'https://remote.example/extra-full.gif'
+          }
+        ]
+      }
+    })
+    setExistsBehavior({ wechatApp: true, cachedKey: false })
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+
+    await expectPreviewImages(1)
+    expect(mocks.readStickerHubAlbumCacheMock).not.toHaveBeenCalled()
+    expect(mocks.refreshStickerHubAlbumMock).not.toHaveBeenCalled()
+
+    await user.click(screen.getByText('缺图专辑'))
+    await expectPreviewImages(3)
+
+    expect(mocks.readStickerHubAlbumCacheMock).toHaveBeenCalledTimes(1)
+    expect(mocks.readStickerHubAlbumCacheMock).toHaveBeenCalledWith(productId)
+    expect(mocks.refreshStickerHubAlbumMock).toHaveBeenCalledTimes(1)
+    expect(mocks.refreshStickerHubAlbumMock).toHaveBeenCalledWith(productId)
+
+    const images = screen.getAllByAltText('emoji') as HTMLImageElement[]
+    expect(images.map((image) => image.src)).toEqual([
+      'https://remote.example/full.gif',
+      'https://remote.example/must-not-export.gif',
+      'https://remote.example/extra-full.gif'
+    ])
+
+    await user.click(screen.getByRole('button', { name: '导出全部' }))
+    await waitFor(() =>
+      expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(3)
+    )
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenNthCalledWith(
+      1,
+      'https://remote.example/full.gif'
+    )
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenNthCalledWith(
+      2,
+      'https://remote.example/must-not-export.gif'
+    )
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenNthCalledWith(
+      3,
+      'https://remote.example/extra-full.gif'
+    )
+  })
+
+  it('keeps a not-found album selected instead of showing favorites', async () => {
+    const productId = 'com.tencent.xin.emoticon.person.not_found_album'
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
+      mode: 'partial',
+      warnings: [],
+      favorites: ['https://favorites.example/visible-only-in-favorites.gif'],
+      albums: [
+        {
+          id: productId,
+          name: '未收录专辑',
+          count: 1,
+          urls: [],
+          items: [],
+          members: [
+            { md5: 'dddddddddddddddddddddddddddddddd', sortOrder: 1 }
+          ],
+          packageId: productId
+        }
+      ]
+    })
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await expectPreviewImages(1)
+
+    await user.click(screen.getByText('未收录专辑'))
+    expect(screen.queryAllByAltText('emoji')).toHaveLength(0)
+    expect(
+      await screen.findByText('这个专辑还没有收录', { selector: 'h6' })
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'StickerHub API' })).toBeInTheDocument()
+    expect(screen.getByText(/专辑表情包由.*提供支持。你可以反馈这个专辑/)).toBeInTheDocument()
+    expect(screen.getByText('未收录专辑', { selector: 'h5' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '通过 GitHub 反馈' })
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '邮件反馈' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '通过 GitHub 反馈' }))
+    expect(
+      await screen.findByText('确认通过 GitHub 反馈')
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        '下一步会打开浏览器中的 GitHub 新建页面。你需要登录 GitHub 并手动点击提交，客户端不会自动提交。'
+      )
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '复制专辑 ID' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '打开 GitHub' })).toBeInTheDocument()
+    expect(mocks.commandExecuteMock).not.toHaveBeenCalled()
+    const githubDialog = screen.getByRole('dialog', {
+      name: '确认通过 GitHub 反馈'
+    })
+    await user.click(within(githubDialog).getByRole('button', { name: '取消' }))
+    await waitForElementToBeRemoved(githubDialog)
+
+    await user.click(screen.getByRole('button', { name: '邮件反馈' }))
+    expect(
+      await screen.findByText(
+        '反馈会发送至开发者邮箱：black.liusheng@gmail.com'
+      )
+    ).toBeInTheDocument()
+    await user.type(
+      screen.getByRole('textbox', {
+        name: '接收补录通知的邮箱（可选）'
+      }),
+      'user@example.com'
+    )
+    await user.click(screen.getByRole('button', { name: '发送反馈' }))
+    expect(await screen.findByText('反馈邮件已发送给开发者')).toBeInTheDocument()
+    await waitForElementToBeRemoved(
+      screen.getByRole('dialog', { name: '邮件反馈' })
+    )
+    expect(mocks.emailFeedbackPostMock).toHaveBeenCalledTimes(1)
+    expect(mocks.emailFeedbackPostMock.mock.calls[0]?.[1]).toMatchObject({
+      value: expect.objectContaining({
+        productId,
+        albumName: '未收录专辑',
+        expectedMemberCount: 1,
+        members: [
+          {
+            memberIndex: 1,
+            md5: 'dddddddddddddddddddddddddddddddd'
+          }
+        ],
+        contactEmail: 'user@example.com'
+      })
+    })
+
+    await user.click(screen.getByRole('button', { name: '通过 GitHub 反馈' }))
+    await user.click(screen.getByRole('button', { name: '复制专辑 ID' }))
+    expect(mocks.writeTextMock).toHaveBeenCalledWith(productId)
+  })
+
+  it('uses a fresh album cache without refreshing the network resource', async () => {
+    const productId = 'com.tencent.xin.emoticon.person.cached_album'
+    const md5 = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
+      mode: 'partial',
+      warnings: [],
+      favorites: ['https://favorites.example/favorite.gif'],
+      albums: [
+        {
+          id: productId,
+          name: '缓存专辑',
+          count: 1,
+          urls: [],
+          items: [],
+          members: [{ md5, sortOrder: 1 }],
+          packageId: productId
+        }
+      ]
+    })
+    mocks.readStickerHubAlbumCacheMock.mockResolvedValue({
+      status: 'fresh',
+      etag: '"cached"',
+      payload: {
+        schemaVersion: 1,
+        productId,
+        iconUrl: null,
+        version: 'cached',
+        members: [
+          {
+            memberIndex: 1,
+            md5,
+            previewUrl: 'https://cache.example/preview.gif',
+            downloadUrl: 'https://cache.example/full.gif'
+          }
+        ]
+      }
+    })
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByText('缓存专辑'))
+    await expectPreviewImages(1)
+
+    expect(mocks.readStickerHubAlbumCacheMock).toHaveBeenCalledWith(productId)
+    expect(mocks.refreshStickerHubAlbumMock).not.toHaveBeenCalled()
+    const image = screen.getByAltText('emoji') as HTMLImageElement
+    expect(image.src).toBe(
+      'https://cache.example/full.gif'
+    )
+
+    mocks.fetchBinaryWithFallbackMock.mockResolvedValueOnce({
+      ok: false,
+      error: new Error('full resource unavailable')
+    })
+    mocks.fetchBinaryWithFallbackMock.mockResolvedValueOnce({
+      ok: true,
+      buffer: new Uint8Array([71, 73, 70, 56]).buffer,
+      usedUrl: 'https://cache.example/preview.gif',
+      contentType: 'image/gif'
+    })
+    fireEvent.error(image)
+    await waitFor(() =>
+      expect((screen.getByAltText('emoji') as HTMLImageElement).src).toBe(
+        'blob:stickerhub-preview'
+      )
+    )
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledWith(
+      'https://cache.example/full.gif'
+    )
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenLastCalledWith(
+      'https://cache.example/preview.gif'
+    )
+  })
+
+  it('does not let a late album response replace the newly selected album', async () => {
+    const firstId = 'com.tencent.xin.emoticon.person.first_album'
+    const secondId = 'com.tencent.xin.emoticon.person.second_album'
+    const firstMd5 = '11111111111111111111111111111111'
+    const secondMd5 = '22222222222222222222222222222222'
+    const firstRefresh = createDeferred<{
+      status: 'ready'
+      retryAfterSeconds: null
+      payload: {
+        schemaVersion: 1
+        productId: string
+        iconUrl: null
+        version: null
+        members: Array<{
+          memberIndex: number
+          md5: string
+          previewUrl: string
+          downloadUrl: string
+        }>
+      }
+    }>()
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
+      mode: 'partial',
+      warnings: [],
+      favorites: ['https://favorites.example/favorite.gif'],
+      albums: [
+        {
+          id: firstId,
+          name: '第一个专辑',
+          count: 1,
+          urls: [],
+          items: [],
+          members: [{ md5: firstMd5, sortOrder: 1 }],
+          packageId: firstId
+        },
+        {
+          id: secondId,
+          name: '第二个专辑',
+          count: 1,
+          urls: [],
+          items: [],
+          members: [{ md5: secondMd5, sortOrder: 1 }],
+          packageId: secondId
+        }
+      ]
+    })
+    mocks.refreshStickerHubAlbumMock.mockImplementation((id: string) => {
+      if (id === firstId) {
+        return firstRefresh.promise
+      }
+      return Promise.resolve({
+        status: 'ready',
+        retryAfterSeconds: null,
+        payload: {
+          schemaVersion: 1,
+          productId: secondId,
+          iconUrl: null,
+          version: null,
+          members: [
+            {
+              memberIndex: 1,
+              md5: secondMd5,
+              previewUrl: 'https://second.example/preview.gif',
+              downloadUrl: 'https://second.example/full.gif'
+            }
+          ]
+        }
+      })
+    })
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByText('第一个专辑'))
+    expect(
+      await screen.findByLabelText('正在加载专辑图片')
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByText('第二个专辑'))
+    await expectPreviewImages(1)
+    expect((screen.getByAltText('emoji') as HTMLImageElement).src).toBe(
+      'https://second.example/full.gif'
+    )
+
+    firstRefresh.resolve({
+      status: 'ready',
+      retryAfterSeconds: null,
+      payload: {
+        schemaVersion: 1,
+        productId: firstId,
+        iconUrl: null,
+        version: null,
+        members: [
+          {
+            memberIndex: 1,
+            md5: firstMd5,
+            previewUrl: 'https://first.example/late.gif',
+            downloadUrl: 'https://first.example/late-full.gif'
+          }
+        ]
+      }
+    })
+
+    await waitFor(() =>
+      expect((screen.getByAltText('emoji') as HTMLImageElement).src).toBe(
+        'https://second.example/full.gif'
+      )
+    )
+    expect(screen.getByText('第二个专辑', { selector: 'h5' })).toBeInTheDocument()
+  })
+
+  it('shows stale cache immediately and respects rate-limit retry time', async () => {
+    const productId = 'com.tencent.xin.emoticon.person.stale_album'
+    const md5 = '33333333333333333333333333333333'
+    const refresh = createDeferred<{
+      status: 'rate_limited'
+      payload: null
+      retryAfterSeconds: number
+    }>()
+    const cachedPayload = {
+      schemaVersion: 1 as const,
+      productId,
+      iconUrl: null,
+      version: 'stale',
+      members: [
+        {
+          memberIndex: 1,
+          md5,
+          previewUrl: 'https://cache.example/stale-preview.gif',
+          downloadUrl: 'https://cache.example/stale-full.gif'
+        }
+      ]
+    }
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
+      mode: 'partial',
+      warnings: [],
+      favorites: ['https://favorites.example/favorite.gif'],
+      albums: [
+        {
+          id: productId,
+          name: '旧缓存专辑',
+          count: 1,
+          urls: [],
+          items: [],
+          members: [{ md5, sortOrder: 1 }],
+          packageId: productId
+        }
+      ]
+    })
+    mocks.readStickerHubAlbumCacheMock.mockResolvedValue({
+      status: 'stale',
+      etag: '"stale"',
+      payload: cachedPayload
+    })
+    mocks.refreshStickerHubAlbumMock.mockReturnValue(refresh.promise)
+
+    const { user } = await renderApp()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByText('旧缓存专辑'))
+
+    expect(
+      await screen.findByText('已显示本地缓存，正在检查更新…')
+    ).toBeInTheDocument()
+    expect((screen.getByAltText('emoji') as HTMLImageElement).src).toBe(
+      'https://cache.example/stale-full.gif'
+    )
+
+    refresh.resolve({
+      status: 'rate_limited',
+      payload: null,
+      retryAfterSeconds: 30
+    })
+    expect(
+      await screen.findByText('请求较频繁，请稍后再试。')
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /秒后重试/ })).toBeDisabled()
   })
 
   it('writes export metadata and closes the completion dialog after opening the directory', async () => {
@@ -397,6 +1058,12 @@ describe('App GUI flow', () => {
         'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
       ]
     })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+      makeFavoritesCatalog([
+        'https://wxapp.tc.qq.com/1/stodownload?m=first&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
+      ])
+    )
     mocks.fetchBinaryWithFallbackMock
       .mockResolvedValueOnce({
         ok: true,
@@ -413,14 +1080,16 @@ describe('App GUI flow', () => {
     setExistsBehavior({ wechatApp: true, cachedKey: false })
 
     const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await expectPreviewImages(2)
 
-    await user.click(screen.getByRole('button', { name: '开始导出' }))
+    await user.click(screen.getByRole('button', { name: '导出全部' }))
 
-    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    const completionDialog = await screen.findByRole('dialog')
+    expect(within(completionDialog).getByText('导出完成')).toBeInTheDocument()
     expect(
-      await screen.findByText(/导出目录：下载\/微信表情包_导出_/)
+      within(completionDialog).getByText(/文件已保存到“下载\/微信表情包_导出_/)
     ).toBeInTheDocument()
     expect(mocks.ensureExportRootDirMock).toHaveBeenCalledTimes(1)
     expect(mocks.writeUsageReadmeMock).toHaveBeenCalledTimes(1)
@@ -438,11 +1107,11 @@ describe('App GUI flow', () => {
     expect(mocks.exportOneEmojiMock).toHaveBeenCalledTimes(2)
     expect(mocks.openExportDirMock).toHaveBeenCalledTimes(1)
 
-    await user.click(screen.getByRole('button', { name: '打开目录' }))
-
-    await waitFor(() =>
-      expect(screen.queryByText('导出完成')).not.toBeInTheDocument()
+    await user.click(
+      within(completionDialog).getByRole('button', { name: '打开文件夹' })
     )
+
+    await waitForElementToBeRemoved(() => screen.queryByRole('dialog'))
     expect(mocks.openExportDirMock).toHaveBeenCalledTimes(2)
   })
 
@@ -450,12 +1119,13 @@ describe('App GUI flow', () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
 
     const { user } = await renderApp()
-    expect(await screen.findByDisplayValue(/wxid_test_123/)).toBeInTheDocument()
+    await waitForPreviewActionEnabled()
+    expect(screen.getByRole('combobox')).toHaveTextContent('wxid_test_123')
 
-    await user.click(screen.getByRole('button', { name: '展开高级选项' }))
-    await user.click(screen.getByRole('button', { name: '清除当前账号缓存' }))
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    await user.click(screen.getByRole('button', { name: '清除缓存' }))
 
-    expect(await screen.findByText('确认清除缓存？')).toBeInTheDocument()
+    expect(await screen.findByText('清除当前账号缓存？')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '清除' }))
 
     await waitFor(() => expect(mocks.removeFileMock).toHaveBeenCalled())
@@ -483,27 +1153,25 @@ describe('App GUI flow', () => {
       logFile: '/tmp/export-wechat-emoji/emoticon_urls.log',
       urls: ['https://wxapp.tc.qq.com/1/stodownload?m=advanced&filekey=1']
     })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+      makeFavoritesCatalog([
+        'https://wxapp.tc.qq.com/1/stodownload?m=advanced&filekey=1'
+      ])
+    )
 
     const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await expectPreviewImages(1)
 
-    await user.click(screen.getByRole('button', { name: '展开高级选项' }))
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    expect(await screen.findByText('当前账号')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '复制 db key' }))
-    await user.click(screen.getByRole('button', { name: '复制 URL 文件路径' }))
-    await user.click(screen.getByRole('button', { name: '复制日志文件路径' }))
-    await user.click(screen.getByRole('button', { name: '打开日志目录' }))
+    await user.click(screen.getByRole('button', { name: '复制' }))
+    expect(mocks.writeTextMock).toHaveBeenCalledWith('d'.repeat(64))
 
-    expect(
-      (mocks.writeTextMock.mock.calls as Array<[string]>).map(
-        ([value]) => value
-      )
-    ).toEqual([
-      'd'.repeat(64),
-      '/tmp/export-wechat-emoji/emoticon_urls.txt',
-      '/tmp/export-wechat-emoji/emoticon_urls.log'
-    ])
+    await user.click(screen.getByRole('button', { name: '诊断信息' }))
+
     expect(mocks.commandExecuteMock).toHaveBeenCalledTimes(1)
   })
 
@@ -527,6 +1195,12 @@ describe('App GUI flow', () => {
         'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
       ]
     })
+    mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
+      makeFavoritesCatalog([
+        'https://wxapp.tc.qq.com/1/stodownload?m=first&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
+      ])
+    )
     mocks.fetchBinaryWithFallbackMock
       .mockResolvedValueOnce({
         ok: true,
@@ -537,20 +1211,21 @@ describe('App GUI flow', () => {
       .mockReturnValueOnce(secondFetch.promise)
 
     const { user } = await renderApp()
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    await waitForPreviewActionEnabled()
+    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await expectPreviewImages(2)
 
-    await user.click(screen.getByRole('button', { name: '开始导出' }))
+    await user.click(screen.getByRole('button', { name: '导出全部' }))
     await waitFor(() =>
       expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(2)
     )
 
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: '取消导出' })).toBeEnabled()
+      expect(screen.getByRole('button', { name: '停止导出' })).toBeEnabled()
     )
-    await user.click(screen.getByRole('button', { name: '取消导出' }))
+    await user.click(screen.getByRole('button', { name: '停止导出' }))
     expect(
-      await screen.findByRole('button', { name: '正在取消…' })
+      await screen.findByRole('button', { name: '正在停止…' })
     ).toBeInTheDocument()
     secondFetch.resolve({
       ok: true,
@@ -564,7 +1239,7 @@ describe('App GUI flow', () => {
     await waitForElementToBeRemoved(() => screen.queryByRole('dialog'))
 
     expect(
-      screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
+      screen.getByRole('button', { name: '继续上次' })
     ).toBeInTheDocument()
 
     mocks.exportedEmojiExistsByKeyMock.mockImplementation(
@@ -578,16 +1253,16 @@ describe('App GUI flow', () => {
     })
 
     await user.click(
-      screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
+      screen.getByRole('button', { name: '继续上次' })
     )
 
     const completionDialog = await screen.findByRole('dialog', {
       name: '导出完成'
     })
     expect(completionDialog).toBeInTheDocument()
-    expect(
-      within(completionDialog).getByText(/总数：2，成功：1，跳过：1，失败：0/)
-    ).toBeInTheDocument()
+    expect(within(completionDialog).getByText('成功')).toBeInTheDocument()
+    expect(within(completionDialog).getByText('跳过')).toBeInTheDocument()
+    expect(within(completionDialog).getByText('失败')).toBeInTheDocument()
     expect(mocks.openExportDirMock).toHaveBeenCalledTimes(1)
   })
 })

@@ -685,6 +685,7 @@ fn terminate_child(child: &mut std::process::Child) {
 #[cfg(target_os = "macos")]
 fn dump_db_key(
     wechat_app: &Path,
+    target_wxid: &str,
     key_file: &Path,
     log_file: &Path,
     no_interactive: bool,
@@ -698,10 +699,13 @@ fn dump_db_key(
 
     std::fs::create_dir_all(key_file.parent().ok_or_else(|| anyhow!("无效输出路径"))?).ok();
 
+    let key_wxid_file = key_file.with_extension("wxid");
+
     let dylib = TempDylib::new()?;
     let run_app = ensure_wechat_runnable_copy(wechat_app)?;
 
     let _ = std::fs::remove_file(key_file);
+    let _ = std::fs::remove_file(&key_wxid_file);
     let _ = std::fs::remove_file(log_file);
 
     eprintln!("即将启动微信副本来抓取 db key...");
@@ -710,7 +714,9 @@ fn dump_db_key(
 
     let mut child = Command::new(run_app.join("Contents/MacOS/WeChat"))
         .env("EXPORT_WECHAT_EMOJI_KEY_OUT", key_file)
+        .env("EXPORT_WECHAT_EMOJI_KEY_WXID_OUT", &key_wxid_file)
         .env("EXPORT_WECHAT_EMOJI_KEY_LOG", log_file)
+        .env("EXPORT_WECHAT_EMOJI_TARGET_WXID", target_wxid)
         .env("DYLD_INSERT_LIBRARIES", dylib.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -722,6 +728,17 @@ fn dump_db_key(
     loop {
         if let Some(line) = read_first_line(key_file) {
             if let Some(k) = normalize_hex_key(&line) {
+                if let Some(actual_wxid) = read_first_line(&key_wxid_file) {
+                    let actual_wxid = actual_wxid.trim().to_string();
+                    if !actual_wxid.is_empty() && actual_wxid != target_wxid {
+                        terminate_child(&mut child);
+                        return Err(anyhow!(
+                            "抓取到的 key 属于另一个微信账号：{}。请在弹出的微信里登录你选择的账号（当前选择：{}）后重试。",
+                            actual_wxid,
+                            target_wxid
+                        ));
+                    }
+                }
                 terminate_child(&mut child);
                 return Ok(k);
             }
@@ -740,6 +757,7 @@ fn dump_db_key(
 }
 
 fn get_or_dump_key(
+    target_wxid: &str,
     wechat_app: &Path,
     key_file: &Path,
     log_file: &Path,
@@ -758,7 +776,14 @@ fn get_or_dump_key(
     ensure_macos()?;
     #[cfg(target_os = "macos")]
     {
-        dump_db_key(wechat_app, key_file, log_file, no_interactive, timeout)
+        dump_db_key(
+            wechat_app,
+            target_wxid,
+            key_file,
+            log_file,
+            no_interactive,
+            timeout,
+        )
     }
     #[cfg(not(target_os = "macos"))]
     unreachable!()
@@ -1134,6 +1159,7 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
     let wechat_app = resolve_user_path(&cli.wechat_app)?;
 
     let key = get_or_dump_key(
+        &account.wxid,
         &wechat_app,
         &key_file,
         &log_file,
@@ -1233,6 +1259,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     let wechat_app = resolve_user_path(&cli.wechat_app)?;
 
     let mut db_key = get_or_dump_key(
+        &account.wxid,
         &wechat_app,
         &key_file,
         &key_log,
@@ -1263,6 +1290,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
                     "[warn] existing db key seems invalid; re-dumping key and retrying...",
                 );
                 db_key = get_or_dump_key(
+                    &account.wxid,
                     &wechat_app,
                     &key_file,
                     &key_log,
@@ -1368,6 +1396,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         seed_key_file_from_legacy(&key_file);
 
         let mut db_key = get_or_dump_key(
+            &account.wxid,
             &wechat_app,
             &key_file,
             &key_log,
@@ -1393,6 +1422,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
                         "[warn] existing db key seems invalid; re-dumping key and retrying...",
                     );
                     db_key = get_or_dump_key(
+                        &account.wxid,
                         &wechat_app,
                         &key_file,
                         &key_log,

@@ -865,6 +865,24 @@ fn auto_dump_emoticon_urls_v4_blocking(
         Err("timed out waiting for db key; login and open the emoji panel once, then try again".to_string())
     }
 
+    fn wait_for_target_wxid_file(
+        wxid_file: &Path,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let mut waited = Duration::from_secs(0);
+        while waited < timeout {
+            if let Some(line) = read_first_line(wxid_file) {
+                let value = line.trim().to_string();
+                if !value.is_empty() {
+                    return Ok(value);
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            waited += Duration::from_secs(1);
+        }
+        Err("timed out waiting for target wxid; login and open the emoji panel once, then try again".to_string())
+    }
+
     fn find_emoticon_db_for_wxid(wxid_dir: &str) -> Result<PathBuf, String> {
         let home_dir = tauri::api::path::home_dir()
             .ok_or_else(|| "failed to resolve home directory".to_string())?;
@@ -903,11 +921,13 @@ fn auto_dump_emoticon_urls_v4_blocking(
     emit_flow(&app, &wxid_dir, "preparing_wechat_copy", "开始获取表情数据…");
 
     let key_file = out_dir.join(format!("emoticon_dbkey_{wxid_dir}.txt"));
+    let key_wxid_file = out_dir.join(format!("emoticon_dbkey_{wxid_dir}.wxid"));
     let key_log = out_dir.join(format!("emoticon_dbkey_{wxid_dir}.log"));
     let urls_file = out_dir.join(format!("emoticon_urls_{wxid_dir}.txt"));
     let urls_log = out_dir.join(format!("emoticon_urls_{wxid_dir}.log"));
 
     let mirror_key_file = mirror_dir.join(format!("emoticon_dbkey_{wxid_dir}.txt"));
+    let mirror_key_wxid_file = mirror_dir.join(format!("emoticon_dbkey_{wxid_dir}.wxid"));
     let mirror_key_log = mirror_dir.join(format!("emoticon_dbkey_{wxid_dir}.log"));
     let mirror_urls_file = mirror_dir.join(format!("emoticon_urls_{wxid_dir}.txt"));
     let mirror_urls_log = mirror_dir.join(format!("emoticon_urls_{wxid_dir}.log"));
@@ -947,8 +967,10 @@ fn auto_dump_emoticon_urls_v4_blocking(
 
         // Truncate key output for a fresh run.
         let _ = std::fs::remove_file(&key_file);
+        let _ = std::fs::remove_file(&key_wxid_file);
         let _ = std::fs::remove_file(&key_log);
         let _ = std::fs::remove_file(&mirror_key_file);
+        let _ = std::fs::remove_file(&mirror_key_wxid_file);
         let _ = std::fs::remove_file(&mirror_key_log);
 
         append_log(
@@ -968,7 +990,9 @@ fn auto_dump_emoticon_urls_v4_blocking(
         );
         let mut child = Command::new(run_app.join("Contents/MacOS/WeChat"))
             .env("EXPORT_WECHAT_EMOJI_KEY_OUT", &key_file)
+            .env("EXPORT_WECHAT_EMOJI_KEY_WXID_OUT", &key_wxid_file)
             .env("EXPORT_WECHAT_EMOJI_KEY_LOG", &key_log)
+            .env("EXPORT_WECHAT_EMOJI_TARGET_WXID", &wxid_dir)
             .env("DYLD_INSERT_LIBRARIES", &dylib)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -977,14 +1001,23 @@ fn auto_dump_emoticon_urls_v4_blocking(
             .map_err(|e| format!("failed to launch WeChat: {e}"))?;
 
         let key_res = wait_for_key_file(&key_file, Duration::from_secs(600));
+        let key_wxid_res = wait_for_target_wxid_file(&key_wxid_file, Duration::from_secs(600));
 
         terminate_child(&mut child);
 
         let key = key_res?;
+        let actual_wxid = key_wxid_res?;
+        if actual_wxid != wxid_dir {
+            return Err(format!(
+                "抓取到的 key 属于另一个微信账号：{}。请在弹出的微信里登录你选择的账号（当前选择：{}）后重试。",
+                actual_wxid, wxid_dir
+            ));
+        }
         emit_flow(&app, &wxid_dir, "offline_parsing", "已获取 key，正在离线解析…");
 
         // Mirror key + log to the WeChat container dir for compatibility.
         let _ = std::fs::copy(&key_file, &mirror_key_file);
+        let _ = std::fs::copy(&key_wxid_file, &mirror_key_wxid_file);
         let _ = std::fs::copy(&key_log, &mirror_key_log);
         let _ = std::fs::write(&mirror_legacy_key, format!("{key}\n"));
         Ok(key)

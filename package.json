@@ -1,7 +1,7 @@
 {
   "name": "export-wechat-emoji",
   "type": "module",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "packageManager": "pnpm@9.15.1+sha1.abc117858086cb10ecb54828d180b035cb6c8fdd",
   "description": "在 macOS 系统上导出微信收藏的表情包（Tauri + React + Rust）",

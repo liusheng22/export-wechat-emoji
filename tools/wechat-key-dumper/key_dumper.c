@@ -275,10 +275,31 @@ static bool is_emoticon_db(const char *path) {
 struct db_salt_entry {
   uint8_t salt[16];
   uint8_t mac_salt[16];
+  char wxid[PATH_MAX];
 };
 
 static struct db_salt_entry *g_emoticon_salts = NULL;
 static size_t g_emoticon_salts_len = 0;
+
+static const char *target_wxid_from_env(void) {
+  const char *wxid = getenv("EXPORT_WECHAT_EMOJI_TARGET_WXID");
+  if (!wxid || !wxid[0]) {
+    return NULL;
+  }
+  return wxid;
+}
+
+static bool should_ignore_top_level_dir(const char *name) {
+  if (!name || !name[0]) {
+    return true;
+  }
+  if (name[0] == '.') {
+    return true;
+  }
+  return strcmp(name, "all_users") == 0 || strcmp(name, "Backup") == 0 ||
+         strcmp(name, "WMPF") == 0 || strcmp(name, "AppletCaches") == 0 ||
+         strcmp(name, "Update") == 0;
+}
 
 static void load_emoticon_db_salts(void) {
   if (g_emoticon_salts) {
@@ -289,6 +310,8 @@ static void load_emoticon_db_salts(void) {
   if (!home || !home[0]) {
     return;
   }
+
+  const char *target_wxid = target_wxid_from_env();
 
   char base[PATH_MAX];
   snprintf(base, sizeof(base),
@@ -301,10 +324,7 @@ static void load_emoticon_db_salts(void) {
 
   struct dirent *ent;
   while ((ent = readdir(dir)) != NULL) {
-    if (ent->d_name[0] == '.') {
-      continue;
-    }
-    if (strncmp(ent->d_name, "wxid_", 5) != 0) {
+    if (should_ignore_top_level_dir(ent->d_name)) {
       continue;
     }
 
@@ -327,6 +347,7 @@ static void load_emoticon_db_salts(void) {
     for (int i = 0; i < 16; i++) {
       entry.mac_salt[i] = salt[i] ^ 0x3a;
     }
+    snprintf(entry.wxid, sizeof(entry.wxid), "%s", ent->d_name);
 
     struct db_salt_entry *new_list =
         (struct db_salt_entry *)realloc(g_emoticon_salts, sizeof(struct db_salt_entry) * (g_emoticon_salts_len + 1));
@@ -339,7 +360,9 @@ static void load_emoticon_db_salts(void) {
 
   closedir(dir);
 
-  log_line("[init] loaded emoticon.db salts: %zu", g_emoticon_salts_len);
+  log_line("[init] loaded emoticon.db salts: %zu%s%s", g_emoticon_salts_len,
+           target_wxid ? " target_wxid=" : "",
+           target_wxid ? target_wxid : "");
 }
 
 static bool salt_matches(const uint8_t *a, const uint8_t *b, size_t len) {
@@ -358,17 +381,29 @@ static void hex_encode(const uint8_t *in, size_t len, char *out, size_t out_size
   out[len * 2] = '\0';
 }
 
-static bool write_key_file(const char *out_path, const char *key_hex) {
-  if (!out_path || !out_path[0] || !key_hex || !key_hex[0]) {
+static bool write_text_file(const char *out_path, const char *text) {
+  if (!out_path || !out_path[0] || !text || !text[0]) {
     return false;
   }
   const int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (fd < 0) {
     return false;
   }
-  dprintf(fd, "%s\n", key_hex);
+  dprintf(fd, "%s\n", text);
   close(fd);
   return true;
+}
+
+static bool write_key_file(const char *out_path, const char *key_hex) {
+  return write_text_file(out_path, key_hex);
+}
+
+static bool write_key_wxid_file(const char *wxid) {
+  const char *out_path = getenv("EXPORT_WECHAT_EMOJI_KEY_WXID_OUT");
+  if (!out_path || !out_path[0]) {
+    return true;
+  }
+  return write_text_file(out_path, wxid);
 }
 
 static void maybe_dump_key_from_pbkdf2(const char *password, size_t password_len, const uint8_t *salt,
@@ -390,17 +425,17 @@ static void maybe_dump_key_from_pbkdf2(const char *password, size_t password_len
     return;
   }
 
-  bool matched_kdf_salt = false;
-  bool matched_mac_salt = false;
+  const struct db_salt_entry *matched_kdf_entry = NULL;
+  const struct db_salt_entry *matched_mac_entry = NULL;
   for (size_t i = 0; i < g_emoticon_salts_len; i++) {
     if (salt_matches(salt, g_emoticon_salts[i].salt, 16)) {
-      matched_kdf_salt = true;
+      matched_kdf_entry = &g_emoticon_salts[i];
     }
     if (salt_matches(salt, g_emoticon_salts[i].mac_salt, 16)) {
-      matched_mac_salt = true;
+      matched_mac_entry = &g_emoticon_salts[i];
     }
   }
-  if (!matched_kdf_salt && !matched_mac_salt) {
+  if (!matched_kdf_entry && !matched_mac_entry) {
     return;
   }
 
@@ -412,18 +447,18 @@ static void maybe_dump_key_from_pbkdf2(const char *password, size_t password_len
   if (password_len == 32) {
     char key_hex[65];
     hex_encode((const uint8_t *)password, 32, key_hex, sizeof(key_hex));
-    if (matched_kdf_salt && rounds > 2) {
-      log_line("[hit] PBKDF2 kdf_salt rounds=%u prf=%d pass_len=32 key=%s", rounds, (int)prf,
-               key_hex);
-      if (write_key_file(out_path, key_hex)) {
+    if (matched_kdf_entry && rounds > 2) {
+      log_line("[hit] PBKDF2 kdf_salt rounds=%u prf=%d pass_len=32 wxid=%s key=%s", rounds,
+               (int)prf, matched_kdf_entry->wxid, key_hex);
+      if (write_key_wxid_file(matched_kdf_entry->wxid) && write_key_file(out_path, key_hex)) {
         dumped = 1;
       }
       return;
     }
-    if (matched_mac_salt && rounds <= 2) {
-      log_line("[hit] PBKDF2 mac_salt rounds=%u prf=%d pass_len=32 key=%s", rounds, (int)prf,
-               key_hex);
-      if (write_key_file(out_path, key_hex)) {
+    if (matched_mac_entry && rounds <= 2) {
+      log_line("[hit] PBKDF2 mac_salt rounds=%u prf=%d pass_len=32 wxid=%s key=%s", rounds,
+               (int)prf, matched_mac_entry->wxid, key_hex);
+      if (write_key_wxid_file(matched_mac_entry->wxid) && write_key_file(out_path, key_hex)) {
         dumped = 1;
       }
       return;
@@ -431,7 +466,7 @@ static void maybe_dump_key_from_pbkdf2(const char *password, size_t password_len
   }
 
   // If it's a 64-hex ASCII string, normalize to lowercase and write as-is (only meaningful for kdf_salt).
-  if (password_len == 64 && matched_kdf_salt && rounds > 2) {
+  if (password_len == 64 && matched_kdf_entry && rounds > 2) {
     const char *s = password;
     char key_hex[65];
     for (size_t i = 0; i < 64; i++) {
@@ -444,9 +479,9 @@ static void maybe_dump_key_from_pbkdf2(const char *password, size_t password_len
       key_hex[i] = (c >= 'A' && c <= 'F') ? (char)(c - 'A' + 'a') : c;
     }
     key_hex[64] = '\0';
-    log_line("[hit] PBKDF2 kdf_salt rounds=%u prf=%d pass_len=64 key=%s", rounds, (int)prf,
-             key_hex);
-    if (write_key_file(out_path, key_hex)) {
+    log_line("[hit] PBKDF2 kdf_salt rounds=%u prf=%d pass_len=64 wxid=%s key=%s", rounds,
+             (int)prf, matched_kdf_entry->wxid, key_hex);
+    if (write_key_wxid_file(matched_kdf_entry->wxid) && write_key_file(out_path, key_hex)) {
       dumped = 1;
     }
     return;
@@ -454,7 +489,7 @@ static void maybe_dump_key_from_pbkdf2(const char *password, size_t password_len
 
   log_line(
       "[skip] PBKDF2 matched emoticon salt but unsupported params: rounds=%u prf=%d pass_len=%zu (kdf_salt=%d mac_salt=%d)",
-      rounds, (int)prf, password_len, matched_kdf_salt ? 1 : 0, matched_mac_salt ? 1 : 0);
+      rounds, (int)prf, password_len, matched_kdf_entry ? 1 : 0, matched_mac_entry ? 1 : 0);
 }
 
 struct url_list {

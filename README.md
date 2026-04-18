@@ -51,10 +51,10 @@
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
 ```
 
-升级到指定版本（例如 `v0.1.3`）：
+升级到指定版本（例如 `v0.1.4`）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.1.3 bash
+curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.1.4 bash
 ```
 
 安装方式 B：Homebrew（推荐长期维护）
@@ -92,7 +92,7 @@ CLI 内置升级命令（脚本安装用户可用）：
 wxemoticon update
 
 # 升级到指定版本
-wxemoticon update --version v0.1.3
+wxemoticon update --version v0.1.4
 ```
 
 说明：

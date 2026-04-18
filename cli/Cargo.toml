@@ -1,6 +1,6 @@
 [package]
 name = "wxemoticon"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "MIT"
 description = "macOS 微信表情包工具：一键抓取 db key / 导出 URL / 导出表情包图片（无需 SIP）"

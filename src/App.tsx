@@ -128,6 +128,7 @@ function App() {
   const [targets, setTargets] = useState<Array<EmojiTargetMeta>>([])
   const [targetsLoading, setTargetsLoading] = useState(false)
   const [targetsError, setTargetsError] = useState<string | null>(null)
+  const [targetsHint, setTargetsHint] = useState<string | null>(null)
   const [selectedTargetValue, setSelectedTargetValue] = useState('')
 
   // 预览/下载数据（来源统一为 URL 列表，但对用户隐藏）
@@ -232,9 +233,22 @@ function App() {
     }`
   }
 
+  function buildNoTargetsHint(diag: WeChatEnvironmentDiag | null): string {
+    if (diag?.v4DataDir.exists && diag.v4DataDir.readable) {
+      return `已读取微信数据目录：${diag.v4DataDir.path}，但没有找到任何包含 emoticon.db 的账号目录。请确认已登录新版微信，并至少打开过一次表情面板；如果仍为空，说明当前微信目录结构可能再次变化。`
+    }
+
+    if (diag?.legacyDataDir.exists && diag.legacyDataDir.readable) {
+      return `已读取旧版微信目录：${diag.legacyDataDir.path}，但没有找到 fav.archive 或 emoticon.db。请确认微信已登录，并点击「刷新」后重试。`
+    }
+
+    return '未检测到微信表情包数据。请确认已安装并登录微信；如果微信已登录但仍为空，请点击“刷新”，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
+  }
+
   async function refreshTargets() {
     setTargetsLoading(true)
     setTargetsError(null)
+    setTargetsHint(null)
     try {
       const list = await findEmojiTargetsWithMeta()
       // Prefer v4 targets first, then legacy. For v4, sort by mtime desc.
@@ -273,11 +287,14 @@ function App() {
         const hint = buildWeChatAccessHint(diag)
         if (hint) {
           setTargetsError(hint)
+        } else {
+          setTargetsHint(buildNoTargetsHint(diag))
         }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setTargetsError(msg || '扫描账号失败')
+      setTargetsHint(null)
       setTargets([])
     } finally {
       setTargetsLoading(false)
@@ -622,7 +639,7 @@ function App() {
         const diag = await diagnoseWeChatEnvironment().catch(() => null)
         const tip =
           buildWeChatAccessHint(diag) ||
-          '未检测到微信表情包数据。请确认已安装并登录微信；如果微信已登录但仍为空，请点击“刷新”，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
+          buildNoTargetsHint(diag)
         setFlowError(tip)
         setFlowStage('error')
         setFlowHint('')
@@ -1010,8 +1027,8 @@ function App() {
 
               {!targetsLoading && !targets.length && !targetsError && (
                 <Alert severity="warning">
-                  没找到微信表情包数据（旧版 fav.archive / 新版 emoticon.db）。
-                  请确认已安装并登录微信；如果微信已登录但仍为空，请点击「刷新」，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。
+                  {targetsHint ||
+                    '没找到微信表情包数据（旧版 fav.archive / 新版 emoticon.db）。请确认已安装并登录微信；如果微信已登录但仍为空，请点击「刷新」，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'}
                 </Alert>
               )}
 

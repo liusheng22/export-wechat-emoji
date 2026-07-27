@@ -88,7 +88,7 @@ wxemoticon export --urls-file /tmp/emoticon_urls.txt
 
 ## CLI（命令行方式）
 
-如果你更喜欢命令行，可使用 `wxemoticon`（macOS）。
+如果你更喜欢命令行，可使用 `wxemoticon`（macOS / Linux）。
 
 安装方式 A：安装脚本（默认，零配置）
 

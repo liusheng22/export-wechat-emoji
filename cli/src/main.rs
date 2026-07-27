@@ -19,6 +19,8 @@ use sha2::Sha512;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
@@ -312,6 +314,43 @@ fn default_out_dir() -> anyhow::Result<PathBuf> {
     }
 }
 
+fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("创建缓存目录失败：{}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("设置缓存目录权限失败：{}", path.display()))?;
+    Ok(())
+}
+
+fn ensure_private_default_out_dir() -> anyhow::Result<PathBuf> {
+    let path = default_out_dir()?;
+    ensure_private_dir(&path)?;
+    Ok(path)
+}
+
+fn write_private_file(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().ok_or_else(|| anyhow!("无效输出路径"))?;
+    if parent == default_out_dir()?.as_path() {
+        ensure_private_default_out_dir()?;
+    } else {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建输出目录失败：{}", parent.display()))?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("写入文件失败：{}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("设置文件权限失败：{}", path.display()))?;
+    file.write_all(content)
+        .with_context(|| format!("写入文件失败：{}", path.display()))
+}
+
 fn default_key_file() -> anyhow::Result<PathBuf> {
     Ok(default_out_dir()?.join("emoticon_dbkey.txt"))
 }
@@ -349,8 +388,8 @@ fn urls_log_for_wxid(wxid: &str) -> anyhow::Result<PathBuf> {
 fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        let explicit = explicit.map(Path::new);
-        linux::discover_data_root(&home_dir()?, explicit)
+        let explicit = explicit.map(resolve_user_path).transpose()?;
+        linux::discover_data_root(&home_dir()?, explicit.as_deref())
     }
     #[cfg(target_os = "macos")]
     {
@@ -528,6 +567,56 @@ fn read_first_line(path: &Path) -> Option<String> {
     content.lines().next().map(|s| s.trim().to_string())
 }
 
+fn database_page_matches_key(page: &[u8], key_bytes: &[u8], treat_as_passphrase: bool) -> bool {
+    const PAGE_SIZE: usize = 4096;
+    const SALT_SIZE: usize = 16;
+    const KEY_SIZE: usize = 32;
+    const HMAC_OFFSET: usize = 4032;
+    const ROUND_COUNT: u32 = 256_000;
+
+    if page.len() != PAGE_SIZE || key_bytes.len() != KEY_SIZE {
+        return false;
+    }
+    if page.starts_with(b"SQLite format 3") {
+        return true;
+    }
+    let salt = &page[..SALT_SIZE];
+    let key = if treat_as_passphrase {
+        pbkdf2_hmac_array::<Sha512, KEY_SIZE>(key_bytes, salt, ROUND_COUNT)
+    } else {
+        let mut key = [0u8; KEY_SIZE];
+        key.copy_from_slice(key_bytes);
+        key
+    };
+    let mac_salt: Vec<u8> = salt.iter().map(|byte| byte ^ 0x3a).collect();
+    let mac_key = pbkdf2_hmac_array::<Sha512, KEY_SIZE>(&key, &mac_salt, 2);
+    let Ok(mut mac) = Hmac::<Sha512>::new_from_slice(&mac_key) else {
+        return false;
+    };
+    mac.update(&page[SALT_SIZE..HMAC_OFFSET]);
+    mac.update(&1u32.to_le_bytes());
+    mac.verify_slice(&page[HMAC_OFFSET..]).is_ok()
+}
+
+fn database_matches_key(path: &Path, key_hex: &str) -> bool {
+    use std::io::Read;
+
+    let Some(key_hex) = normalize_hex_key(key_hex) else {
+        return false;
+    };
+    let Ok(key) = hex::decode(key_hex) else {
+        return false;
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut page = [0u8; 4096];
+    if file.read_exact(&mut page).is_err() {
+        return false;
+    }
+    database_page_matches_key(&page, &key, true) || database_page_matches_key(&page, &key, false)
+}
+
 fn seed_key_file_from_legacy(dst: &Path) {
     if dst.exists() {
         return;
@@ -544,10 +633,7 @@ fn seed_key_file_from_legacy(dst: &Path) {
     let Some(k) = normalize_hex_key(&line) else {
         return;
     };
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let _ = std::fs::write(dst, format!("{k}\n"));
+    let _ = write_private_file(dst, format!("{k}\n").as_bytes());
 }
 
 fn append_log(path: &Path, line: &str) {
@@ -846,24 +932,36 @@ fn get_or_dump_key(
     force: bool,
     timeout: Duration,
 ) -> anyhow::Result<String> {
+    if key_file.parent() == Some(default_out_dir()?.as_path()) {
+        ensure_private_default_out_dir()?;
+    }
     if !force && key_file.exists() {
         if let Some(line) = read_first_line(key_file) {
             if let Some(k) = normalize_hex_key(&line) {
-                return Ok(k);
+                if database_matches_key(emoticon_db, &k) {
+                    write_private_file(key_file, format!("{k}\n").as_bytes())?;
+                    return Ok(k);
+                }
+                append_log(
+                    log_file,
+                    "[warn] cached key does not match the selected database; refreshing it",
+                );
             }
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        dump_db_key(
+        let key = dump_db_key(
             wechat_app,
             target_wxid,
             key_file,
             log_file,
             no_interactive,
             timeout,
-        )
+        )?;
+        write_private_file(key_file, format!("{key}\n").as_bytes())?;
+        Ok(key)
     }
     #[cfg(target_os = "linux")]
     {
@@ -871,11 +969,7 @@ fn get_or_dump_key(
         let _ = no_interactive;
         wait_for_wechat_exit(wechat_app, no_interactive)?;
         let key = linux::dump_db_key(wechat_app, emoticon_db, log_file, timeout)?;
-        if let Some(parent) = key_file.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        std::fs::write(key_file, format!("{key}\n"))
-            .with_context(|| format!("写入 key 文件失败：{}", key_file.display()))?;
+        write_private_file(key_file, format!("{key}\n").as_bytes())?;
         Ok(key)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1266,7 +1360,7 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
     // Keep legacy cache file for compatibility with the app/scripts.
     if let Ok(legacy) = default_key_file() {
         if legacy != key_file {
-            let _ = std::fs::write(&legacy, format!("{key}\n"));
+            let _ = write_private_file(&legacy, format!("{key}\n").as_bytes());
         }
     }
 
@@ -1414,7 +1508,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     // Keep legacy cache files for compatibility with the app/scripts.
     if let Ok(legacy_key) = default_key_file() {
         if legacy_key != key_file {
-            let _ = std::fs::write(&legacy_key, format!("{db_key}\n"));
+            let _ = write_private_file(&legacy_key, format!("{db_key}\n").as_bytes());
         }
     }
     if let Ok(legacy_urls) = default_urls_file() {
@@ -1491,7 +1585,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         let key_log = key_log_for_wxid(&account.wxid)?;
         let wechat_app = resolve_user_path(&cli.wechat_app)?;
 
-        std::fs::create_dir_all(default_out_dir()?).ok();
+        ensure_private_default_out_dir()?;
         let _ = std::fs::remove_file(&urls_file);
         let _ = std::fs::remove_file(&urls_log);
         let _ = std::fs::write(&urls_log, "");
@@ -1554,7 +1648,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         // Keep legacy cache files for compatibility with the app/scripts.
         if let Ok(legacy_key) = default_key_file() {
             if legacy_key != key_file {
-                let _ = std::fs::write(&legacy_key, format!("{db_key}\n"));
+                let _ = write_private_file(&legacy_key, format!("{db_key}\n").as_bytes());
             }
         }
         if let Ok(legacy_urls) = default_urls_file() {
@@ -1850,6 +1944,7 @@ fn shell_single_quote(input: &str) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn linux_global_paths_are_parsed() {
@@ -1880,6 +1975,44 @@ mod cli_tests {
         .unwrap();
 
         assert_eq!(cli.wechat_app, "/Applications/WeChat.app");
+    }
+
+    #[test]
+    fn database_key_validation_rejects_a_stale_key() {
+        let key = [0x31; 32];
+        let mut page = [0u8; 4096];
+        for (index, byte) in page[..4032].iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let salt = &page[..16];
+        let mac_salt: Vec<u8> = salt.iter().map(|byte| byte ^ 0x3a).collect();
+        let mac_key = pbkdf2_hmac_array::<Sha512, 32>(&key, &mac_salt, 2);
+        let mut mac = Hmac::<Sha512>::new_from_slice(&mac_key).unwrap();
+        mac.update(&page[16..4032]);
+        mac.update(&1u32.to_le_bytes());
+        page[4032..].copy_from_slice(&mac.finalize().into_bytes());
+
+        assert!(database_page_matches_key(&page, &key, false));
+        assert!(!database_page_matches_key(&page, &[0x32; 32], false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_cache_permissions_are_restricted() {
+        let tmp = tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        ensure_private_dir(&cache).unwrap();
+        let secret = cache.join("key.txt");
+        write_private_file(&secret, b"secret\n").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
 

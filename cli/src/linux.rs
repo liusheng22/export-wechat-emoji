@@ -1,12 +1,15 @@
 use anyhow::{anyhow, Context};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const SESSION_TOKEN_ENV: &str = "WXEMOTICON_SESSION_TOKEN";
 
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac_array;
@@ -24,8 +27,19 @@ pub(crate) struct KeyCandidate {
     pub(crate) salt: Option<[u8; 16]>,
 }
 
-fn xdg_documents_dir(home: &Path) -> Option<PathBuf> {
-    let config = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).ok()?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    process_group: u32,
+    start_time: u64,
+    executable: PathBuf,
+}
+
+fn xdg_documents_dir(home: &Path, config_home: Option<&Path>) -> Option<PathBuf> {
+    let config_dir = config_home
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".config"));
+    let config = std::fs::read_to_string(config_dir.join("user-dirs.dirs")).ok()?;
     let value = config.lines().find_map(|line| {
         line.trim()
             .strip_prefix("XDG_DOCUMENTS_DIR=")
@@ -136,19 +150,30 @@ pub(crate) fn is_wechat_process_name(name: &str) -> bool {
     )
 }
 
-pub(crate) fn parse_child_pids(value: &str) -> Vec<u32> {
-    let mut seen = HashSet::new();
-    value
-        .split_whitespace()
-        .filter_map(|token| token.parse::<u32>().ok())
-        .filter(|pid| seen.insert(*pid))
-        .collect()
-}
-
 fn process_name(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .ok()
         .map(|name| name.trim().to_string())
+}
+
+fn parse_process_stat(pid: u32, stat: &str, executable: PathBuf) -> Option<ProcessIdentity> {
+    let close_paren = stat.rfind(')')?;
+    let fields: Vec<&str> = stat.get(close_paren + 1..)?.split_whitespace().collect();
+    // The slice starts at field 3 (state): pgrp is field 5, starttime is field 22.
+    let process_group = fields.get(2)?.parse().ok()?;
+    let start_time = fields.get(19)?.parse().ok()?;
+    Some(ProcessIdentity {
+        pid,
+        process_group,
+        start_time,
+        executable,
+    })
+}
+
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    parse_process_stat(pid, &stat, executable)
 }
 
 fn process_belongs_to_current_user(pid: u32) -> bool {
@@ -181,34 +206,50 @@ fn wechat_pids() -> HashSet<u32> {
         .collect()
 }
 
-fn new_process_ids(before: &HashSet<u32>, after: &HashSet<u32>) -> Vec<u32> {
-    let mut pids: Vec<u32> = after.difference(before).copied().collect();
-    pids.sort_unstable();
-    pids
-}
-
 pub(crate) fn wechat_is_running() -> bool {
     !wechat_pids().is_empty()
 }
 
-fn descendants(root: u32) -> Vec<u32> {
-    let mut out = vec![root];
-    let mut cursor = 0usize;
-    let mut seen = HashSet::from([root]);
-    while cursor < out.len() {
-        let pid = out[cursor];
-        cursor += 1;
-        let children_path = format!("/proc/{pid}/task/{pid}/children");
-        let Ok(children) = std::fs::read_to_string(children_path) else {
-            continue;
-        };
-        for child in parse_child_pids(&children) {
-            if seen.insert(child) {
-                out.push(child);
-            }
-        }
-    }
-    out
+fn new_session_token() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn process_has_session_token(pid: u32, token: &str) -> bool {
+    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    let expected = format!("{SESSION_TOKEN_ENV}={token}");
+    environ
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == expected.as_bytes())
+}
+
+fn session_members(token: &str, process_group: u32, install_root: &Path) -> Vec<ProcessIdentity> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut members: Vec<ProcessIdentity> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+        })
+        .filter(|pid| process_belongs_to_current_user(*pid))
+        .filter_map(process_identity)
+        .filter(|identity| {
+            identity.executable.starts_with(install_root)
+                && (process_has_session_token(identity.pid, token)
+                    || identity.process_group == process_group)
+        })
+        .collect();
+    members.sort_by_key(|identity| identity.pid);
+    members
 }
 
 fn read_database_page(path: &Path) -> anyhow::Result<[u8; 4096]> {
@@ -249,10 +290,10 @@ fn scan_process_for_key(
     pid: u32,
     page: &[u8; 4096],
     target_salt: &[u8; 16],
+    deadline: Instant,
 ) -> anyhow::Result<Option<[u8; 32]>> {
     const CHUNK_SIZE: usize = 1024 * 1024;
     const OVERLAP: usize = 256;
-    const MAX_REGION_SIZE: u64 = 512 * 1024 * 1024;
 
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))
         .with_context(|| format!("无法读取 /proc/{pid}/maps"))?;
@@ -261,13 +302,12 @@ fn scan_process_for_key(
     let mut buffer = vec![0u8; CHUNK_SIZE];
 
     for region in parse_readable_regions(&maps) {
-        let region_size = region.end - region.start;
-        if region_size == 0 || region_size > MAX_REGION_SIZE {
-            continue;
-        }
         let mut offset = region.start;
         let mut tail = Vec::new();
         while offset < region.end {
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
             let wanted = ((region.end - offset) as usize).min(buffer.len());
             let read = match mem.read_at(&mut buffer[..wanted], offset) {
                 Ok(0) | Err(_) => break,
@@ -291,18 +331,86 @@ fn scan_process_for_key(
     Ok(None)
 }
 
-fn terminate(child: &mut Child, extra_pids: &[u32]) {
-    for pid in extra_pids {
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
+fn send_signal(identity: &ProcessIdentity, signal: &str) {
+    if process_identity(identity.pid).as_ref() != Some(identity) {
+        return;
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = Command::new("/bin/kill")
+        .args([signal, &identity.pid.to_string()])
+        .status();
+}
+
+struct LaunchedWechat {
+    child: Child,
+    session_token: String,
+    process_group: u32,
+    install_root: PathBuf,
+    tracked: HashMap<u32, ProcessIdentity>,
+    cleaned: bool,
+}
+
+impl LaunchedWechat {
+    fn refresh(&mut self) -> Vec<ProcessIdentity> {
+        let members = session_members(&self.session_token, self.process_group, &self.install_root);
+        for identity in &members {
+            self.tracked.insert(identity.pid, identity.clone());
+        }
+        members
+    }
+
+    fn has_live_members(&self) -> bool {
+        self.tracked
+            .values()
+            .any(|identity| process_identity(identity.pid).as_ref() == Some(identity))
+    }
+
+    fn cleanup(&mut self) {
+        self.cleanup_with_grace(Duration::from_secs(3), Duration::from_secs(1));
+    }
+
+    fn cleanup_with_grace(&mut self, term_grace: Duration, kill_grace: Duration) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+        let deadline = Instant::now() + term_grace;
+        while Instant::now() < deadline {
+            for identity in self.refresh() {
+                send_signal(&identity, "-TERM");
+            }
+            if self.child.try_wait().ok().flatten().is_some() && !self.has_live_members() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let reap_deadline = Instant::now() + kill_grace;
+        while Instant::now() < reap_deadline {
+            for identity in self.refresh() {
+                send_signal(&identity, "-KILL");
+            }
+            let _ = self.child.kill();
+            if self.child.try_wait().ok().flatten().is_some() && !self.has_live_members() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for LaunchedWechat {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
 }
 
 fn append_log(path: &Path, message: &str) {
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+    {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         let _ = writeln!(file, "{message}");
     }
 }
@@ -321,45 +429,56 @@ pub(crate) fn dump_db_key(
     if let Some(parent) = log_file.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let _ = std::fs::write(log_file, "[info] Linux key scan started\n");
+    let mut log_options = OpenOptions::new();
+    log_options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600);
+    if let Ok(mut log) = log_options.open(log_file) {
+        let _ = std::fs::set_permissions(log_file, std::fs::Permissions::from_mode(0o600));
+        let _ = log.write_all(b"[info] Linux key scan started\n");
+    }
 
-    let baseline_pids = wechat_pids();
-    let mut child = Command::new(wechat_bin)
+    let canonical_bin = std::fs::canonicalize(wechat_bin)
+        .with_context(|| format!("解析 Linux 微信程序路径失败：{}", wechat_bin.display()))?;
+    let install_root = canonical_bin
+        .parent()
+        .ok_or_else(|| anyhow!("无法确定 Linux 微信安装目录：{}", canonical_bin.display()))?
+        .to_path_buf();
+    let session_token = new_session_token();
+    let child = Command::new(&canonical_bin)
+        .env(SESSION_TOKEN_ENV, &session_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .with_context(|| format!("启动 Linux 微信失败：{}", wechat_bin.display()))?;
     let root_pid = child.id();
+    let mut launched = LaunchedWechat {
+        child,
+        session_token,
+        process_group: root_pid,
+        install_root,
+        tracked: HashMap::new(),
+        cleaned: false,
+    };
     append_log(log_file, &format!("[info] launched pid={root_pid}"));
     let started = Instant::now();
+    let deadline = started + timeout;
     let mut last_permission_error = None;
     let mut child_exited = false;
 
-    while started.elapsed() <= timeout {
-        let current_pids = wechat_pids();
-        let mut scan_pids = new_process_ids(&baseline_pids, &current_pids);
-        for pid in descendants(root_pid) {
-            if pid == root_pid
-                || process_name(pid)
-                    .as_deref()
-                    .is_some_and(is_wechat_process_name)
-            {
-                scan_pids.push(pid);
-            }
-        }
-        scan_pids.sort_unstable();
-        scan_pids.dedup();
-
-        for pid in &scan_pids {
-            match scan_process_for_key(*pid, &page, &target_salt) {
+    while Instant::now() <= deadline {
+        let members = launched.refresh();
+        for identity in &members {
+            match scan_process_for_key(identity.pid, &page, &target_salt, deadline) {
                 Ok(Some(key)) => {
                     append_log(
                         log_file,
-                        &format!("[info] matched target database in pid={pid}"),
+                        &format!("[info] matched target database in pid={}", identity.pid),
                     );
-                    let launched = new_process_ids(&baseline_pids, &wechat_pids());
-                    terminate(&mut child, &launched);
                     return Ok(hex::encode(key));
                 }
                 Ok(None) => {}
@@ -368,10 +487,10 @@ pub(crate) fn dump_db_key(
                 }
             }
         }
-        if !child_exited && child.try_wait().ok().flatten().is_some() {
+        if !child_exited && launched.child.try_wait().ok().flatten().is_some() {
             child_exited = true;
         }
-        if child_exited && new_process_ids(&baseline_pids, &wechat_pids()).is_empty() {
+        if child_exited && !launched.has_live_members() {
             return Err(anyhow!(
                 "Linux 微信在获取密钥前退出；请查看日志：{}",
                 log_file.display()
@@ -380,8 +499,6 @@ pub(crate) fn dump_db_key(
         thread::sleep(Duration::from_secs(1));
     }
 
-    let launched = new_process_ids(&baseline_pids, &wechat_pids());
-    terminate(&mut child, &launched);
     if let Some(error) = last_permission_error {
         append_log(log_file, &format!("[warn] {error}"));
     }
@@ -392,7 +509,11 @@ pub(crate) fn dump_db_key(
     ))
 }
 
-pub(crate) fn discover_data_root(home: &Path, explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+fn discover_data_root_with_config(
+    home: &Path,
+    explicit: Option<&Path>,
+    config_home: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
     if let Some(path) = explicit {
         if path.is_dir() {
             return Ok(path.to_path_buf());
@@ -401,7 +522,7 @@ pub(crate) fn discover_data_root(home: &Path, explicit: Option<&Path>) -> anyhow
     }
 
     let mut candidates = Vec::new();
-    if let Some(documents) = xdg_documents_dir(home) {
+    if let Some(documents) = xdg_documents_dir(home, config_home) {
         candidates.push(documents.join("xwechat_files"));
     }
     candidates.push(home.join("Documents/xwechat_files"));
@@ -415,6 +536,11 @@ pub(crate) fn discover_data_root(home: &Path, explicit: Option<&Path>) -> anyhow
                 home.display()
             )
         })
+}
+
+pub(crate) fn discover_data_root(home: &Path, explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    discover_data_root_with_config(home, explicit, config_home.as_deref())
 }
 
 #[cfg(test)]
@@ -469,6 +595,24 @@ mod tests {
         .unwrap();
 
         let actual = discover_data_root(tmp.path(), None).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn data_root_uses_custom_xdg_config_home() {
+        let tmp = tempdir().unwrap();
+        let config_home = tmp.path().join("xdg-config");
+        let expected = tmp.path().join("Docs/xwechat_files");
+        fs::create_dir_all(&expected).unwrap();
+        fs::create_dir_all(&config_home).unwrap();
+        fs::write(
+            config_home.join("user-dirs.dirs"),
+            "XDG_DOCUMENTS_DIR=\"$HOME/Docs\"\n",
+        )
+        .unwrap();
+
+        let actual = discover_data_root_with_config(tmp.path(), None, Some(&config_home)).unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -574,11 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn children_parser_ignores_invalid_tokens_and_duplicates() {
-        assert_eq!(parse_child_pids("12 34 bad 12\n"), vec![12, 34]);
-    }
-
-    #[test]
     fn raw_key_is_verified_against_database_page_hmac() {
         let key = [0x33; 32];
         let mut page = [0u8; 4096];
@@ -598,10 +737,76 @@ mod tests {
     }
 
     #[test]
-    fn new_process_ids_exclude_preexisting_wechat_processes() {
-        let before = HashSet::from([10, 20]);
-        let after = HashSet::from([20, 30, 40]);
+    fn process_stat_parser_extracts_group_and_start_time() {
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[1] = "1";
+        fields[2] = "123";
+        fields[19] = "987654";
+        let stat = format!("123 (wechat) {}", fields.join(" "));
 
-        assert_eq!(new_process_ids(&before, &after), vec![30, 40]);
+        let parsed = parse_process_stat(123, &stat, PathBuf::from("/opt/wechat/wechat")).unwrap();
+
+        assert_eq!(parsed.pid, 123);
+        assert_eq!(parsed.process_group, 123);
+        assert_eq!(parsed.start_time, 987654);
+    }
+
+    #[test]
+    fn session_token_tracks_a_process_after_setsid() {
+        let token = new_session_token();
+        let mut child = Command::new("/usr/bin/setsid")
+            .args(["/bin/sleep", "10"])
+            .env(SESSION_TOKEN_ENV, &token)
+            .spawn()
+            .unwrap();
+        let mut found = false;
+        let mut excluded_outside_install_root = false;
+        for _ in 0..40 {
+            excluded_outside_install_root = session_members(
+                &token,
+                u32::MAX,
+                Path::new("/definitely-not-the-install-root"),
+            )
+            .iter()
+            .all(|identity| identity.pid != child.id());
+            found = session_members(&token, u32::MAX, Path::new("/usr/bin"))
+                .iter()
+                .any(|identity| identity.pid == child.id());
+            if found {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            found,
+            "setsid process was not found through its session token"
+        );
+        assert!(
+            excluded_outside_install_root,
+            "token must not include executables outside the install root"
+        );
+    }
+
+    #[test]
+    fn cleanup_is_bounded_even_when_root_is_not_discoverable() {
+        let child = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let mut launched = LaunchedWechat {
+            child,
+            session_token: "missing-token".to_string(),
+            process_group: u32::MAX,
+            install_root: PathBuf::from("/not-used"),
+            tracked: HashMap::new(),
+            cleaned: false,
+        };
+        let started = Instant::now();
+
+        launched.cleanup_with_grace(Duration::from_millis(25), Duration::from_millis(500));
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(launched.child.try_wait().unwrap().is_some());
     }
 }

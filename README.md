@@ -169,17 +169,17 @@ wxemoticon export
 ### 指定 `wxid` 的完整示例
 
 ```bash
-# 1) 先列出账号，拿到目标 wxid（例如 wxid_p5stvq48u5mv12_57c3）
+# 1) 先列出账号，拿到目标 wxid（例如 wxid_xxx）
 wxemoticon urls --list-accounts
 
 # 2) 指定 wxid 抓取/刷新 db key
-wxemoticon key --wxid "wxid_p5stvq48u5mv12_57c3"
+wxemoticon key --wxid "wxid_xxx"
 
 # 3) 指定 wxid 导出 URL 列表（可选）
-wxemoticon urls --wxid "wxid_p5stvq48u5mv12_57c3"
+wxemoticon urls --wxid "wxid_xxx"
 
 # 4) 指定 wxid 直接导出表情包图片
-wxemoticon export --wxid "wxid_p5stvq48u5mv12_57c3"
+wxemoticon export --wxid "wxid_xxx"
 ```
 
 如果你想做脚本化（不走交互），可以加 `--no-interactive` 与 `--json`：

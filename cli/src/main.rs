@@ -8,6 +8,7 @@ use dialoguer::{Confirm, Input, Select};
 use hmac::{Hmac, Mac};
 use indicatif::{ProgressBar, ProgressStyle};
 use pbkdf2::pbkdf2_hmac_array;
+#[cfg(target_os = "macos")]
 use plist::Value;
 use regex::Regex;
 use reqwest::header::CONTENT_TYPE;
@@ -19,11 +20,22 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 use tempfile::NamedTempFile;
 use tokio::time::Instant;
 use url::Url;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "macos")]
+const DEFAULT_WECHAT_PATH: &str = "/Applications/WeChat.app";
+#[cfg(target_os = "linux")]
+const DEFAULT_WECHAT_PATH: &str = "/opt/wechat/wechat";
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const DEFAULT_WECHAT_PATH: &str = "wechat";
 
 // The key dumper dylib is built by build.rs and embedded here so the CLI stays a single executable.
 #[cfg(target_os = "macos")]
@@ -34,12 +46,21 @@ static WECHAT_KEY_DUMPER_DYLIB: &[u8] = include_bytes!(env!("WXEMOTICON_KEY_DUMP
     name = "wxemoticon",
     author,
     version,
-    about = "macOS 微信表情包工具（无需 SIP）：抓取 db key / 导出 URL / 导出表情包图片"
+    about = "macOS/Linux 微信表情包工具：抓取 db key / 导出 URL / 导出表情包图片"
 )]
 struct Cli {
-    /// WeChat.app 路径（默认 /Applications/WeChat.app；也可传 /Applications/WeChat.bak.app）
-    #[arg(long, global = true, default_value = "/Applications/WeChat.app")]
+    /// 微信程序路径（Linux 默认 /opt/wechat/wechat；macOS 默认 /Applications/WeChat.app）
+    #[arg(
+        long = "wechat-bin",
+        visible_alias = "wechat-app",
+        global = true,
+        default_value = DEFAULT_WECHAT_PATH
+    )]
     wechat_app: String,
+
+    /// xwechat_files 数据目录；Linux 会自动检测 ~/Documents 和 ~/文档
+    #[arg(long, global = true)]
+    wechat_data_dir: Option<String>,
 
     /// 关闭交互提示（需要把必要参数都传全）
     #[arg(long, global = true)]
@@ -145,7 +166,7 @@ struct ExportArgs {
     wxid: Option<String>,
 
     /// 从已有 URL 文件导出（跳过抓 key/解密查询）
-    #[arg(long, hide = true)]
+    #[arg(long)]
     urls_file: Option<String>,
 
     /// 导出目录（默认 ~/Downloads/微信表情包_导出_YYYYMMDD_HHMMSS）
@@ -247,6 +268,7 @@ struct ExportResult {
     failed: usize,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateResult {
@@ -279,8 +301,15 @@ fn home_dir() -> anyhow::Result<PathBuf> {
 }
 
 fn default_out_dir() -> anyhow::Result<PathBuf> {
-    Ok(home_dir()?
-        .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji"))
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(home_dir()?
+            .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(home_dir()?.join(".local/share/wxemoticon"))
+    }
 }
 
 fn default_key_file() -> anyhow::Result<PathBuf> {
@@ -317,8 +346,25 @@ fn urls_log_for_wxid(wxid: &str) -> anyhow::Result<PathBuf> {
     Ok(default_out_dir()?.join(format!("emoticon_urls_{wxid}.log")))
 }
 
-fn xwechat_files_dir() -> anyhow::Result<PathBuf> {
-    Ok(home_dir()?.join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"))
+fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let explicit = explicit.map(Path::new);
+        linux::discover_data_root(&home_dir()?, explicit)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(path) = explicit {
+            return resolve_user_path(path);
+        }
+        return Ok(home_dir()?
+            .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = explicit;
+        Err(anyhow!("当前操作系统不受支持"))
+    }
 }
 
 fn downloads_dir() -> anyhow::Result<PathBuf> {
@@ -350,6 +396,24 @@ fn open_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn open_reveal(path: &Path) -> anyhow::Result<()> {
+    let target = path.parent().unwrap_or(path);
+    open_dir(target)
+}
+
+#[cfg(target_os = "linux")]
+fn open_dir(path: &Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .context("执行 xdg-open 失败")?;
+    if !status.success() {
+        return Err(anyhow!("打开目录失败：{}", path.display()));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn wechat_is_running(wechat_app: &Path) -> bool {
     // Don't use `ps | grep` / `pgrep -f` because they may match themselves and cause false positives.
@@ -367,9 +431,7 @@ fn wechat_is_running(wechat_app: &Path) -> bool {
         .map(|n| format!("{n}/Contents/"))
         .collect();
 
-    let out = Command::new("/bin/ps")
-        .args(["-A", "-o", "args="])
-        .output();
+    let out = Command::new("/bin/ps").args(["-A", "-o", "args="]).output();
     let Ok(out) = out else { return false };
     let text = String::from_utf8_lossy(&out.stdout);
     for line in text.lines() {
@@ -404,7 +466,9 @@ fn wait_for_wechat_exit(wechat_app: &Path, no_interactive: bool) -> anyhow::Resu
     }
 
     if no_interactive {
-        return Err(anyhow!("检测到微信仍在运行：必须先完全退出微信才能继续抓取 key"));
+        return Err(anyhow!(
+            "检测到微信仍在运行：必须先完全退出微信才能继续抓取 key"
+        ));
     }
 
     loop {
@@ -419,9 +483,31 @@ fn wait_for_wechat_exit(wechat_app: &Path, no_interactive: bool) -> anyhow::Resu
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn wait_for_wechat_exit(_wechat_app: &Path, no_interactive: bool) -> anyhow::Result<()> {
+    if !linux::wechat_is_running() {
+        return Ok(());
+    }
+    if no_interactive {
+        return Err(anyhow!(
+            "检测到微信仍在运行：必须先完全退出微信才能继续抓取 key"
+        ));
+    }
+    loop {
+        prompt_enter_to_continue(
+            no_interactive,
+            "检测到微信仍在运行：请完全退出微信，然后按回车重新检查。",
+        )?;
+        if !linux::wechat_is_running() {
+            return Ok(());
+        }
+        eprintln!("仍检测到微信进程，请确认已完全退出。");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn wait_for_wechat_exit(_wechat_app: &Path, _no_interactive: bool) -> anyhow::Result<()> {
-    Ok(())
+    Err(anyhow!("当前操作系统不受支持"))
 }
 
 fn normalize_hex_key(input: &str) -> Option<String> {
@@ -470,16 +556,15 @@ fn append_log(path: &Path, line: &str) {
     }
 }
 
-fn find_accounts() -> anyhow::Result<Vec<Account>> {
-    let base = xwechat_files_dir()?;
+fn find_accounts(base: &Path) -> anyhow::Result<Vec<Account>> {
     if !base.exists() {
         return Ok(vec![]);
     }
     let mut out = vec![];
-    for ent in std::fs::read_dir(&base).context("读取 xwechat_files 失败")? {
+    for ent in std::fs::read_dir(base).context("读取 xwechat_files 失败")? {
         let ent = ent?;
         let name = ent.file_name().to_string_lossy().to_string();
-        
+
         // 过滤掉微信内部已知的非账号共享目录
         let ignore_dirs = ["all_users", "Backup", "WMPF", "AppletCaches", "Update"];
         if ignore_dirs.contains(&name.as_str()) || name.starts_with('.') {
@@ -518,11 +603,15 @@ fn format_mtime(mtime: Option<SystemTime>) -> String {
     dt.format(&fmt).unwrap_or_else(|_| "未知".to_string())
 }
 
-fn select_account(accounts: &[Account], no_interactive: bool) -> anyhow::Result<Account> {
+fn select_account(
+    accounts: &[Account],
+    data_root: &Path,
+    no_interactive: bool,
+) -> anyhow::Result<Account> {
     if accounts.is_empty() {
         return Err(anyhow!(
             "未找到任何账号：请确认已登录新版微信（4.x），且目录存在：{}",
-            xwechat_files_dir()?.display()
+            data_root.display()
         ));
     }
 
@@ -559,16 +648,6 @@ fn select_account(accounts: &[Account], no_interactive: bool) -> anyhow::Result<
         .interact_on(&term_stderr())
         .context("读取选择失败")?;
     Ok(accounts[idx].clone())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ensure_macos() -> anyhow::Result<()> {
-    Err(anyhow!("wxemoticon 目前仅支持 macOS"))
-}
-
-#[cfg(target_os = "macos")]
-fn ensure_macos() -> anyhow::Result<()> {
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -756,8 +835,10 @@ fn dump_db_key(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn get_or_dump_key(
     target_wxid: &str,
+    emoticon_db: &Path,
     wechat_app: &Path,
     key_file: &Path,
     log_file: &Path,
@@ -773,7 +854,6 @@ fn get_or_dump_key(
         }
     }
 
-    ensure_macos()?;
     #[cfg(target_os = "macos")]
     {
         dump_db_key(
@@ -785,8 +865,31 @@ fn get_or_dump_key(
             timeout,
         )
     }
-    #[cfg(not(target_os = "macos"))]
-    unreachable!()
+    #[cfg(target_os = "linux")]
+    {
+        let _ = target_wxid;
+        let _ = no_interactive;
+        wait_for_wechat_exit(wechat_app, no_interactive)?;
+        let key = linux::dump_db_key(wechat_app, emoticon_db, log_file, timeout)?;
+        if let Some(parent) = key_file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(key_file, format!("{key}\n"))
+            .with_context(|| format!("写入 key 文件失败：{}", key_file.display()))?;
+        Ok(key)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (
+            target_wxid,
+            emoticon_db,
+            wechat_app,
+            log_file,
+            no_interactive,
+            timeout,
+        );
+        Err(anyhow!("当前操作系统不受支持"))
+    }
 }
 
 #[derive(Debug)]
@@ -856,7 +959,7 @@ fn decrypt_db_file_v4_with_key(
 
     // SQLCipher reserved bytes per page are IV + HMAC, aligned to AES block size.
     let mut reserve = IV_SIZE + HMAC_SHA512_SIZE;
-    if reserve % AES_BLOCK_SIZE != 0 {
+    if !reserve.is_multiple_of(AES_BLOCK_SIZE) {
         reserve = ((reserve / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE;
     }
 
@@ -990,10 +1093,8 @@ fn score_emoticon_url(url: &str) -> i32 {
 fn best_emoticon_url_from_fields(fields: &[Option<String>]) -> Option<String> {
     let mut candidates = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
-    for f in fields {
-        if let Some(s) = f {
-            push_urls_from_string(s, &mut candidates, &mut seen);
-        }
+    for s in fields.iter().flatten() {
+        push_urls_from_string(s, &mut candidates, &mut seen);
     }
     if candidates.is_empty() {
         return None;
@@ -1066,13 +1167,9 @@ fn extract_urls_from_emoticon_db(emoticon_db: &Path, db_key: &str) -> anyhow::Re
             if seen_md5.contains(&md5) {
                 continue;
             }
-            if let Some(best) = best_emoticon_url_from_fields(&[
-                cdn,
-                tp,
-                thumb,
-                extern_url,
-                encrypt_url,
-            ]) {
+            if let Some(best) =
+                best_emoticon_url_from_fields(&[cdn, tp, thumb, extern_url, encrypt_url])
+            {
                 seen_md5.insert(md5);
                 urls.push(best);
             }
@@ -1111,13 +1208,9 @@ fn extract_urls_from_emoticon_db(emoticon_db: &Path, db_key: &str) -> anyhow::Re
             if !seen_md5.insert(md5) {
                 continue;
             }
-            if let Some(best) = best_emoticon_url_from_fields(&[
-                cdn,
-                tp,
-                thumb,
-                extern_url,
-                encrypt_url,
-            ]) {
+            if let Some(best) =
+                best_emoticon_url_from_fields(&[cdn, tp, thumb, extern_url, encrypt_url])
+            {
                 urls.push(best);
             }
         }
@@ -1127,7 +1220,8 @@ fn extract_urls_from_emoticon_db(emoticon_db: &Path, db_key: &str) -> anyhow::Re
 }
 
 async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
-    let accounts = find_accounts()?;
+    let data_root = xwechat_files_dir(cli.wechat_data_dir.as_deref())?;
+    let accounts = find_accounts(&data_root)?;
     let account = if let Some(wxid) = &args.wxid {
         let wxid = wxid.trim().to_string();
         accounts
@@ -1137,7 +1231,7 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
                 anyhow!("未找到账号：{wxid}（可先运行 `wxemoticon urls --list-accounts`）")
             })?
     } else {
-        select_account(&accounts, cli.no_interactive)?
+        select_account(&accounts, &data_root, cli.no_interactive)?
     };
 
     let key_file = if let Some(p) = &args.out {
@@ -1160,6 +1254,7 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
 
     let key = get_or_dump_key(
         &account.wxid,
+        &account.emoticon_db,
         &wechat_app,
         &key_file,
         &log_file,
@@ -1191,6 +1286,8 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
     if args.open {
         #[cfg(target_os = "macos")]
         open_reveal(&key_file)?;
+        #[cfg(target_os = "linux")]
+        open_reveal(&key_file)?;
     }
     Ok(())
 }
@@ -1202,12 +1299,13 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
         ));
     }
 
-    let accounts = find_accounts()?;
+    let data_root = xwechat_files_dir(cli.wechat_data_dir.as_deref())?;
+    let accounts = find_accounts(&data_root)?;
     if args.list_accounts {
         if accounts.is_empty() {
             println!(
                 "未找到账号（目录不存在或未登录微信）：{}",
-                xwechat_files_dir()?.display()
+                data_root.display()
             );
             return Ok(());
         }
@@ -1226,7 +1324,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
                 anyhow!("未找到账号：{wxid}（可先运行 `wxemoticon urls --list-accounts`）")
             })?
     } else {
-        select_account(&accounts, cli.no_interactive)?
+        select_account(&accounts, &data_root, cli.no_interactive)?
     };
 
     let out_file = if let Some(p) = &args.out {
@@ -1260,6 +1358,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
 
     let mut db_key = get_or_dump_key(
         &account.wxid,
+        &account.emoticon_db,
         &wechat_app,
         &key_file,
         &key_log,
@@ -1291,6 +1390,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
                 );
                 db_key = get_or_dump_key(
                     &account.wxid,
+                    &account.emoticon_db,
                     &wechat_app,
                     &key_file,
                     &key_log,
@@ -1353,6 +1453,8 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     if args.open {
         #[cfg(target_os = "macos")]
         open_reveal(&out_file)?;
+        #[cfg(target_os = "linux")]
+        open_reveal(&out_file)?;
     }
     Ok(())
 }
@@ -1371,14 +1473,15 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         }
     } else {
         // Reuse the `urls` pipeline.
-        let accounts = find_accounts()?;
+        let data_root = xwechat_files_dir(cli.wechat_data_dir.as_deref())?;
+        let accounts = find_accounts(&data_root)?;
         let account = if let Some(wx) = &args.wxid {
             let wx = wx.trim().to_string();
             accounts.into_iter().find(|a| a.wxid == wx).ok_or_else(|| {
                 anyhow!("未找到账号：{wx}（可先运行 `wxemoticon urls --list-accounts`）")
             })?
         } else {
-            select_account(&accounts, cli.no_interactive)?
+            select_account(&accounts, &data_root, cli.no_interactive)?
         };
         wxid = Some(account.wxid.clone());
 
@@ -1397,6 +1500,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
 
         let mut db_key = get_or_dump_key(
             &account.wxid,
+            &account.emoticon_db,
             &wechat_app,
             &key_file,
             &key_log,
@@ -1423,6 +1527,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
                     );
                     db_key = get_or_dump_key(
                         &account.wxid,
+                        &account.emoticon_db,
                         &wechat_app,
                         &key_file,
                         &key_log,
@@ -1508,19 +1613,18 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
             .ok()
             .map(|mut it| it.next().is_some())
             .unwrap_or(false)
+        && !cli.no_interactive
     {
-        if !cli.no_interactive {
-            let ok = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!(
-                    "目录已存在且非空：{}，继续写入？",
-                    out_dir.display()
-                ))
-                .default(false)
-                .interact_on(&term_stderr())
-                .unwrap_or(false);
-            if !ok {
-                return Err(anyhow!("已取消"));
-            }
+        let ok = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "目录已存在且非空：{}，继续写入？",
+                out_dir.display()
+            ))
+            .default(false)
+            .interact_on(&term_stderr())
+            .unwrap_or(false);
+        if !ok {
+            return Err(anyhow!("已取消"));
         }
     }
 
@@ -1565,12 +1669,10 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(args.concurrency.max(1)));
     let mut handles = Vec::with_capacity(jobs.len());
     for (idx, url) in jobs {
-        if args.skip_existing {
-            if export_existing_file(&out_dir, idx, group_size, &url).is_some() {
-                skipped += 1;
-                pb.inc(1);
-                continue;
-            }
+        if args.skip_existing && export_existing_file(&out_dir, idx, group_size, &url).is_some() {
+            skipped += 1;
+            pb.inc(1);
+            continue;
         }
         let permit = sem.clone().acquire_owned().await?;
         let client = client.clone();
@@ -1633,11 +1735,14 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
     if args.open {
         #[cfg(target_os = "macos")]
         open_dir(&out_dir)?;
+        #[cfg(target_os = "linux")]
+        open_dir(&out_dir)?;
     }
 
     Ok(())
 }
 
+#[allow(unreachable_code)]
 async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
@@ -1693,7 +1798,10 @@ async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
             ),
         ];
         if version != "latest" {
-            env_parts.push(format!("WXEMOTICON_VERSION={}", shell_single_quote(&version)));
+            env_parts.push(format!(
+                "WXEMOTICON_VERSION={}",
+                shell_single_quote(&version)
+            ));
         }
 
         let cmdline = format!(
@@ -1731,11 +1839,48 @@ async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn shell_single_quote(input: &str) -> String {
     if input.is_empty() {
         return "''".to_string();
     }
     format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn linux_global_paths_are_parsed() {
+        let cli = Cli::try_parse_from([
+            "wxemoticon",
+            "--wechat-bin",
+            "/opt/custom/wechat",
+            "--wechat-data-dir",
+            "/data/xwechat_files",
+            "urls",
+            "--list-accounts",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.wechat_app, "/opt/custom/wechat");
+        assert_eq!(cli.wechat_data_dir.as_deref(), Some("/data/xwechat_files"));
+    }
+
+    #[test]
+    fn legacy_wechat_app_flag_remains_an_alias() {
+        let cli = Cli::try_parse_from([
+            "wxemoticon",
+            "--wechat-app",
+            "/Applications/WeChat.app",
+            "urls",
+            "--list-accounts",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.wechat_app, "/Applications/WeChat.app");
+    }
 }
 
 fn resolve_user_path(input: &str) -> anyhow::Result<PathBuf> {
@@ -1756,10 +1901,7 @@ fn parse_urls_from_text(input: &str) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
     for m in re.find_iter(input) {
-        let u = m
-            .as_str()
-            .trim()
-            .trim_end_matches(|c: char| c == '"' || c == '\'' || c == ')');
+        let u = m.as_str().trim().trim_end_matches(['"', '\'', ')']);
         if seen.insert(u.to_string()) {
             out.push(u.to_string());
         }
@@ -1918,7 +2060,11 @@ fn file_key_from_url(url: &str, fallback_index0: usize) -> String {
     format!("{:06}", fallback_index0 + 1)
 }
 
-async fn download_one(client: &Client, url: &str, fallback_index0: usize) -> anyhow::Result<Downloaded> {
+async fn download_one(
+    client: &Client,
+    url: &str,
+    fallback_index0: usize,
+) -> anyhow::Result<Downloaded> {
     let candidates = stodownload_candidates(url);
     let mut last_err: Option<anyhow::Error> = None;
     for c in candidates {
@@ -1936,7 +2082,9 @@ async fn download_one(client: &Client, url: &str, fallback_index0: usize) -> any
                 let bytes = resp.bytes().await.context("读取响应失败")?.to_vec();
                 let ext = ext_from_bytes(&bytes)
                     .map(|s| s.to_string())
-                    .or_else(|| ext_from_content_type(content_type.as_deref()).map(|s| s.to_string()))
+                    .or_else(|| {
+                        ext_from_content_type(content_type.as_deref()).map(|s| s.to_string())
+                    })
                     .or_else(|| ext_from_url(&c))
                     .unwrap_or_else(|| "gif".to_string());
                 let file_key = file_key_from_url(&c, fallback_index0);

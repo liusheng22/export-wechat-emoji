@@ -2014,6 +2014,18 @@ mod cli_tests {
             0o600
         );
     }
+
+    #[test]
+    fn download_candidates_fall_back_to_the_tls_valid_wechat_cdn_host() {
+        let source = "https://vweixinf.tc.qq.com/110/20401/stodownload.webp?m=abc&hy=SZ";
+
+        let candidates = stodownload_candidates(source);
+
+        assert_eq!(candidates[0], source);
+        assert!(candidates.contains(
+            &"https://wxapp.tc.qq.com/110/20401/stodownload.webp?m=abc&hy=SZ".to_string()
+        ));
+    }
 }
 
 fn resolve_user_path(input: &str) -> anyhow::Result<PathBuf> {
@@ -2073,20 +2085,32 @@ struct Downloaded {
 }
 
 fn stodownload_candidates(url: &str) -> Vec<String> {
-    if !url.contains("/stodownload") {
-        return vec![url.to_string()];
-    }
     let exts = ["gif", "jpg", "png", "webp"];
     let mut out = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
 
     let mut push = |s: String| {
         if seen.insert(s.clone()) {
-            out.push(s);
+            out.push(s.clone());
+        }
+        let Ok(mut parsed) = Url::parse(&s) else {
+            return;
+        };
+        if parsed.host_str() == Some("vweixinf.tc.qq.com")
+            && parsed.set_host(Some("wxapp.tc.qq.com")).is_ok()
+        {
+            let fallback = parsed.to_string();
+            if seen.insert(fallback.clone()) {
+                out.push(fallback);
+            }
         }
     };
 
     push(url.to_string());
+
+    if !url.contains("/stodownload") {
+        return out;
+    }
 
     // Replace `/stodownload` or `/stodownload.xxx` right before `?`.
     // Keep order: original -> gif/jpg/png/webp variants.

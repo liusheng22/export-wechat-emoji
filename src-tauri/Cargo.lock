@@ -4775,6 +4775,7 @@ dependencies = [
  "cocoa",
  "hex",
  "hmac",
+ "objc",
  "pbkdf2",
  "plist",
  "rusqlite",

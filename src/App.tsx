@@ -89,6 +89,11 @@ import {
   findEmojiTargetsWithMeta,
   type EmojiTargetMeta
 } from './services/wechat'
+import {
+  restoreWeChatDataBookmark,
+  saveWeChatDataBookmark,
+  type WeChatDataAccessStatus
+} from './services/wechat-data-access'
 import './App.css'
 
 type FlowStage =
@@ -227,6 +232,12 @@ function App() {
   const [downloadDirPath, setDownloadDirPath] = useState('')
   const [homeDirPath, setHomeDirPath] = useState('')
   const [appDataDirPath, setAppDataDirPath] = useState('')
+  const [wechatDataAccess, setWechatDataAccess] =
+    useState<WeChatDataAccessStatus | null>(null)
+  const [wechatDataAccessLoading, setWechatDataAccessLoading] = useState(true)
+  const [wechatDataAccessError, setWechatDataAccessError] = useState<
+    string | null
+  >(null)
 
   // 自动抓取状态（带步骤）
   const [flowStage, setFlowStage] = useState<FlowStage>('idle')
@@ -297,7 +308,7 @@ function App() {
       return null
     }
 
-    return `无法读取微信数据目录：${unreadable.path}。请确认微信已登录；如果微信已登录但仍失败，请在系统设置中为本应用开启“完全磁盘访问权限”后重试。${
+    return `无法读取微信数据目录：${unreadable.path}。请确认微信已登录；可在「高级设置」中授权微信数据目录，避免每次启动重复出现系统访问提示。如果仍失败，请在系统设置中为本应用开启“完全磁盘访问权限”后重试。${
       unreadable.error ? `（${unreadable.error}）` : ''
     }`
   }
@@ -311,7 +322,7 @@ function App() {
       return `已读取旧版微信目录：${diag.legacyDataDir.path}，但没有找到 fav.archive 或 emoticon.db。请确认微信已登录，并点击「刷新」后重试。`
     }
 
-    return '未检测到微信表情包数据。请确认已安装并登录微信；如果微信已登录但仍为空，请点击“刷新”，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
+    return '未检测到微信表情包数据。请确认已安装并登录微信；可在「高级设置」中授权微信数据目录，避免每次启动重复出现系统访问提示。如果微信已登录但仍为空，请点击“刷新”，或在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
   }
 
   async function refreshTargets() {
@@ -371,8 +382,20 @@ function App() {
   }
 
   useEffect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    refreshTargets()
+    // Restore the persisted directory scope before the first WeChat scan.
+    restoreWeChatDataBookmark()
+      .then((status) => {
+        setWechatDataAccess(status)
+        setWechatDataAccessError(null)
+      })
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error)
+        setWechatDataAccessError(detail || '恢复微信数据目录授权失败')
+      })
+      .finally(() => {
+        setWechatDataAccessLoading(false)
+        void refreshTargets()
+      })
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     downloadDir()
       .then(setDownloadDirPath)
@@ -593,6 +616,41 @@ function App() {
       }
     } catch {
       // ignore
+    }
+  }
+
+  async function authorizeWeChatDataDirectory() {
+    setWechatDataAccessLoading(true)
+    setWechatDataAccessError(null)
+    try {
+      const home = homeDirPath || (await homeDir())
+      const expectedPath = await join(
+        home,
+        'Library',
+        'Containers',
+        'com.tencent.xinWeChat',
+        'Data'
+      )
+      const selected = await open({
+        title: '授权微信数据目录（请直接点击“打开”）',
+        defaultPath: expectedPath,
+        multiple: false,
+        directory: true
+      })
+      if (typeof selected !== 'string' || !selected) {
+        return
+      }
+
+      const status = await saveWeChatDataBookmark(selected)
+      setWechatDataAccess(status)
+      showToastMessage('微信数据目录授权已保存', 'success')
+      await refreshTargets()
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      setWechatDataAccessError(detail || '保存微信数据目录授权失败')
+      showToastMessage('微信数据目录授权失败', 'warning')
+    } finally {
+      setWechatDataAccessLoading(false)
     }
   }
 
@@ -1418,12 +1476,29 @@ function App() {
                 </Button>
               </Stack>
 
+              {!wechatDataAccess && !wechatDataAccessLoading && (
+                <Alert
+                  severity="info"
+                  action={
+                    <Button
+                      color="inherit"
+                      size="small"
+                      onClick={() => setActiveTab('advanced')}
+                    >
+                      去授权
+                    </Button>
+                  }
+                >
+                  macOS 会在应用每次启动时询问是否访问微信数据。可在“高级设置”中一次性授权微信数据目录，减少重复提示。
+                </Alert>
+              )}
+
               {targetsError && <Alert severity="error">{targetsError}</Alert>}
 
               {!targetsLoading && !targets.length && !targetsError && (
                 <Alert severity="warning">
                   {targetsHint ||
-                    '没找到微信表情包数据（旧版 fav.archive / 新版 emoticon.db）。请确认已安装并登录微信；如果微信已登录但仍为空，请点击「刷新」，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'}
+                    '没找到微信表情包数据（旧版 fav.archive / 新版 emoticon.db）。请确认已安装并登录微信；可在「高级设置」中授权微信数据目录以避免每次启动重复提示。如果仍为空，请点击「刷新」，或在系统设置中为本应用开启“完全磁盘访问权限”后重试。'}
                 </Alert>
               )}
 
@@ -1527,10 +1602,11 @@ function App() {
                     </Button>
                   </Stack>
 
-                  {(flowStage === 'checkingWechat' ||
-                    flowStage === 'preparingWeChatCopy' ||
-                    flowStage === 'waitingForKey' ||
-                    flowStage === 'offlineParsing') && (
+                  {previewTaskIntent === 'initial' &&
+                    (flowStage === 'checkingWechat' ||
+                      flowStage === 'preparingWeChatCopy' ||
+                      flowStage === 'waitingForKey' ||
+                      flowStage === 'offlineParsing') && (
                     <Box>
                       {selectedTargetMeta?.kind === 'v4' && (
                         <Stepper
@@ -1778,6 +1854,9 @@ function App() {
 
               {activeTab === 'advanced' && (
                 <Stack spacing={1.5}>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    表情排序方式
+                  </Typography>
                   <FormControl size="small" fullWidth>
                     <InputLabel id="emoji-sort-order-label">
                       表情排序
@@ -1796,15 +1875,49 @@ function App() {
                     </Select>
                   </FormControl>
 
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    微信数据访问授权
+                  </Typography>
+                  <Alert severity={wechatDataAccess ? 'success' : 'info'}>
+                    {wechatDataAccess
+                      ? '已保存目录授权'
+                      : '授权后会保存 security-scoped bookmark，并在每次扫描前恢复。选择器已预选微信 Data 目录，只需点击“打开”。'}
+                  </Alert>
+                  {wechatDataAccessError && (
+                    <Alert severity="warning">{wechatDataAccessError}</Alert>
+                  )}
+                  <Stack direction="row" spacing={1.25} alignItems="center">
+                    <Button
+                      variant="outlined"
+                      onClick={authorizeWeChatDataDirectory}
+                      disabled={
+                        wechatDataAccessLoading ||
+                        isExporting ||
+                        isPreviewLoading ||
+                        targetsLoading
+                      }
+                    >
+                      {wechatDataAccessLoading
+                        ? '正在处理…'
+                        : wechatDataAccess
+                          ? '重新授权微信目录'
+                          : '授权微信数据目录'}
+                    </Button>
+                    <Typography variant="caption" color="text.secondary">
+                      目标目录：~/Library/Containers/com.tencent.xinWeChat/Data
+                    </Typography>
+                  </Stack>
+
+                  <Divider />
+
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    WeChat.app 路径
+                  </Typography>
                   <Alert severity="info">
                     这里用于设置微信应用路径与查看调试产物。默认使用
                     /Applications/WeChat.app；如果你保留了官方备份（如
                     WeChat.bak.app），可在这里选择对应路径。
                   </Alert>
-
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                    WeChat.app 路径
-                  </Typography>
                   <Stack direction="row" spacing={1.5} alignItems="center">
                     <TextField
                       label="WeChat.app 路径"

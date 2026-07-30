@@ -13,7 +13,9 @@ import { clearEmojiBinaryCacheForTests } from './services/emoji-binary-cache'
 
 const mocks = vi.hoisted(() => ({
   messageMock: vi.fn(async () => {}),
-  openDialogMock: vi.fn(async () => null),
+  openDialogMock: vi.fn(
+    async (): Promise<string | Array<string> | null> => null
+  ),
   listenMock: vi.fn(async () => () => {}),
   writeTextMock: vi.fn(async (value: string) => {
     void value
@@ -59,7 +61,9 @@ const mocks = vi.hoisted(() => ({
   exportOneEmojiMock: vi.fn(async () => {}),
   openExportDirMock: vi.fn(async () => {}),
   checkWeChatRunningMock: vi.fn(),
-  diagnoseWeChatEnvironmentMock: vi.fn()
+  diagnoseWeChatEnvironmentMock: vi.fn(),
+  restoreWeChatDataBookmarkMock: vi.fn(),
+  saveWeChatDataBookmarkMock: vi.fn()
 }))
 
 vi.mock('@tauri-apps/api/dialog', () => ({
@@ -172,6 +176,11 @@ vi.mock('./services/wechat', async () => {
   }
 })
 
+vi.mock('./services/wechat-data-access', () => ({
+  restoreWeChatDataBookmark: mocks.restoreWeChatDataBookmarkMock,
+  saveWeChatDataBookmark: mocks.saveWeChatDataBookmarkMock
+}))
+
 type V4Target = {
   kind: 'v4'
   wxidDir: string
@@ -253,6 +262,12 @@ beforeEach(() => {
   mocks.fetchBinaryWithFallbackMock.mockReset()
 
   mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([])
+  mocks.restoreWeChatDataBookmarkMock.mockResolvedValue(null)
+  mocks.saveWeChatDataBookmarkMock.mockResolvedValue({
+    path: '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data',
+    securityScopeStarted: true,
+    stale: false
+  })
   mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
     wxid: 'wxid_test_123',
     dbKey: 'a'.repeat(64),
@@ -302,6 +317,31 @@ beforeEach(() => {
 })
 
 describe('App GUI flow', () => {
+  it('preselects the WeChat Data directory and saves a persistent access grant', async () => {
+    const dataPath =
+      '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data'
+    mocks.openDialogMock.mockResolvedValueOnce(dataPath)
+
+    const { user } = await renderApp()
+    await user.click(await screen.findByRole('button', { name: '去授权' }))
+    await user.click(
+      screen.getByRole('button', { name: '授权微信数据目录' })
+    )
+
+    await waitFor(() =>
+      expect(mocks.openDialogMock).toHaveBeenCalledWith({
+        title: '授权微信数据目录（请直接点击“打开”）',
+        defaultPath: dataPath,
+        multiple: false,
+        directory: true
+      })
+    )
+    expect(mocks.saveWeChatDataBookmarkMock).toHaveBeenCalledWith(dataPath)
+    expect(
+      await screen.findByText('已保存目录授权')
+    ).toBeInTheDocument()
+  })
+
   it('opens on the preview tab without the redundant page title and routes empty export state back to preview', async () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
 

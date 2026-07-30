@@ -1,5 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// objc 0.2 macros still probe this legacy feature on recent Rust toolchains.
+#![allow(unexpected_cfgs)]
 
 use aes::Aes256;
 use cbc::cipher::block_padding::NoPadding;
@@ -21,9 +23,14 @@ use tauri::Manager;
 use tempfile::NamedTempFile;
 
 mod emoji_file_cache;
+mod wechat_data_bookmark;
 use emoji_file_cache::{
-    __cmd__cache_and_copy_emoji_file, __cmd__copy_cached_emoji_file,
-    cache_and_copy_emoji_file, copy_cached_emoji_file,
+    __cmd__cache_and_copy_emoji_file, __cmd__copy_cached_emoji_file, cache_and_copy_emoji_file,
+    copy_cached_emoji_file,
+};
+use wechat_data_bookmark::{
+    __cmd__restore_wechat_data_bookmark, __cmd__save_wechat_data_bookmark,
+    restore_wechat_data_bookmark, save_wechat_data_bookmark,
 };
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
@@ -1333,6 +1340,8 @@ fn main() {
             greet,
             copy_cached_emoji_file,
             cache_and_copy_emoji_file,
+            save_wechat_data_bookmark,
+            restore_wechat_data_bookmark,
             file_mtime_ms,
             check_wechat_running,
             diagnose_wechat_environment,

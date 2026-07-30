@@ -14,9 +14,16 @@ const mocks = vi.hoisted(() => ({
   messageMock: vi.fn(async () => {}),
   openDialogMock: vi.fn(async () => null),
   listenMock: vi.fn(async () => () => {}),
-  writeTextMock: vi.fn(async (_value: string) => {}),
-  fsExistsMock: vi.fn(async (_path: string) => false),
-  removeFileMock: vi.fn(async (_path: string) => {}),
+  writeTextMock: vi.fn(async (value: string) => {
+    void value
+  }),
+  fsExistsMock: vi.fn(async (path: string) => {
+    void path
+    return false
+  }),
+  removeFileMock: vi.fn(async (path: string) => {
+    void path
+  }),
   createDirMock: vi.fn(async () => {}),
   writeBinaryFileMock: vi.fn(async () => {}),
   writeTextFileMock: vi.fn(async () => {}),
@@ -43,9 +50,10 @@ const mocks = vi.hoisted(() => ({
   writeUsageReadmeMock: vi.fn(async () => {}),
   writeUrlsFileMock: vi.fn(async () => {}),
   writeDbKeyFileMock: vi.fn(async () => {}),
-  exportedEmojiExistsByKeyMock: vi.fn(
-    async (_options?: { index: number }) => false
-  ),
+  exportedEmojiExistsByKeyMock: vi.fn(async (options?: { index: number }) => {
+    void options
+    return false
+  }),
   exportOneEmojiMock: vi.fn(async () => {}),
   openExportDirMock: vi.fn(async () => {}),
   checkWeChatRunningMock: vi.fn(),
@@ -165,6 +173,14 @@ type V4Target = {
   mtimeMs: number | null
 }
 
+type LegacyTarget = {
+  kind: 'legacy'
+  versionDir: string
+  userDir: string
+  favArchivePath: string
+  mtimeMs: number | null
+}
+
 function createDeferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -180,6 +196,16 @@ function makeV4Target(wxid = 'wxid_test_123'): V4Target {
     kind: 'v4',
     wxidDir: wxid,
     emoticonDbPath: `Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/${wxid}/db_storage/emoticon/emoticon.db`,
+    mtimeMs: 1_700_000_000_000
+  }
+}
+
+function makeLegacyTarget(): LegacyTarget {
+  return {
+    kind: 'legacy',
+    versionDir: '2.0b4.0.9',
+    userDir: '0123456789abcdef0123456789abcdef',
+    favArchivePath: '/Users/tester/WeChat/Stickers/fav.archive',
     mtimeMs: 1_700_000_000_000
   }
 }
@@ -205,7 +231,11 @@ async function renderApp() {
   const user = userEvent.setup()
   render(<App />)
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '一键获取并预览' })).toBeEnabled()
+    expect(
+      screen.getByRole('button', {
+        name: /一键获取并预览|重新获取|正在重新获取…/
+      })
+    ).toBeInTheDocument()
   )
   return { user }
 }
@@ -230,6 +260,12 @@ beforeEach(() => {
     usedUrl: 'https://wxapp.tc.qq.com/1/stodownload?m=first&filekey=1',
     contentType: 'image/gif'
   })
+  mocks.exportedEmojiExistsByKeyMock.mockImplementation(
+    async (options?: { index: number }) => {
+      void options
+      return false
+    }
+  )
   mocks.checkWeChatRunningMock.mockResolvedValue({
     running: false,
     matches: []
@@ -258,6 +294,131 @@ beforeEach(() => {
 })
 
 describe('App GUI flow', () => {
+  it('opens on the preview tab without the redundant page title and routes empty export state back to preview', async () => {
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+
+    const { user } = await renderApp()
+
+    expect(screen.queryByText('导出微信表情包')).not.toBeInTheDocument()
+    expect(screen.queryByText('账号')).not.toBeInTheDocument()
+    expect(screen.queryByText(/该账号最后更新时间/)).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '表情预览' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+
+    await user.click(screen.getByRole('tab', { name: '导出' }))
+    expect(screen.getByText('请先在“表情预览”中获取表情。')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '去获取' }))
+    expect(screen.getByRole('tab', { name: '表情预览' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+  })
+
+  it('shows newest emojis first by default and persists an oldest-first preference', async () => {
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'a'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: [
+        'https://wxapp.tc.qq.com/1/stodownload?m=oldest&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=newest&filekey=2'
+      ]
+    })
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+
+    const previewSources = () =>
+      Array.from(
+        document.querySelectorAll<HTMLImageElement>('.img-preview img')
+      ).map((img) => img.src)
+    expect(previewSources()[0]).toContain('m=newest')
+
+    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    await user.click(screen.getByRole('combobox', { name: '表情排序' }))
+    await user.click(screen.getByRole('option', { name: '最早添加在前' }))
+
+    expect(localStorage.getItem('wxemoticon_emoji_sort_order')).toBe(
+      'oldest-first'
+    )
+    await user.click(screen.getByRole('tab', { name: '表情预览' }))
+    expect(previewSources()[0]).toContain('m=oldest')
+  })
+
+  it('keeps preview loading active while the user switches tabs', async () => {
+    const dump = createDeferred<{
+      wxid: string
+      dbKey: string
+      dbKeyFile: string
+      urlsFile: string
+      logFile: string
+      urls: Array<string>
+    }>()
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockReturnValueOnce(dump.promise)
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    await waitFor(() =>
+      expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledTimes(1)
+    )
+
+    await user.click(screen.getByRole('tab', { name: '导出' }))
+    expect(screen.getByText('请先在“表情预览”中获取表情。')).toBeInTheDocument()
+
+    dump.resolve({
+      wxid: 'wxid_test_123',
+      dbKey: 'a'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: ['https://wxapp.tc.qq.com/1/stodownload?m=done&filekey=1']
+    })
+
+    expect(
+      await screen.findByRole('button', { name: '开始导出' })
+    ).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '导出' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+  })
+
+  it('restores a persisted oldest-first preference on startup', async () => {
+    localStorage.setItem('wxemoticon_emoji_sort_order', 'oldest-first')
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'a'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: [
+        'https://wxapp.tc.qq.com/1/stodownload?m=oldest&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=newest&filekey=2'
+      ]
+    })
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+
+    const firstImage =
+      document.querySelector<HTMLImageElement>('.img-preview img')
+    expect(firstImage?.src).toContain('m=oldest')
+    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    expect(
+      screen.getByRole('combobox', { name: '表情排序' })
+    ).toHaveTextContent('最早添加在前')
+  })
+
   it('shows a clear message when no account data is found', async () => {
     mocks.diagnoseWeChatEnvironmentMock.mockResolvedValue({
       v4DataDir: {
@@ -324,7 +485,7 @@ describe('App GUI flow', () => {
 
     expect(
       await screen.findAllByText(
-        /未找到 WeChat\.app。请在「高级选项」里选择正确的 WeChat\.app 路径后重试。/
+        /未找到 WeChat\.app。请在「高级设置」里选择正确的 WeChat\.app 路径后重试。/
       )
     ).not.toHaveLength(0)
   })
@@ -350,11 +511,12 @@ describe('App GUI flow', () => {
     expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
     expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledWith(
       'wxid_test_123',
-      '/Applications/WeChat.app'
+      '/Applications/WeChat.app',
+      true
     )
   })
 
-  it('auto-selects the single account and skips quit check when cached db key exists', async () => {
+  it('auto-selects the single account and refreshes automatically when cached db key exists', async () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
     mocks.checkWeChatRunningMock.mockResolvedValue({
       running: true,
@@ -370,18 +532,109 @@ describe('App GUI flow', () => {
     })
     setExistsBehavior({ wechatApp: true, cachedKey: true })
 
-    const { user } = await renderApp()
+    await renderApp()
 
     expect(await screen.findByDisplayValue(/wxid_test_123/)).toBeInTheDocument()
     expect(screen.queryByLabelText('选择账号')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-
     expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledTimes(1)
+    expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledWith(
+      'wxid_test_123',
+      '/Applications/WeChat.app',
+      false
+    )
     expect(mocks.checkWeChatRunningMock).not.toHaveBeenCalled()
     expect(
       screen.queryByText(/必须先完全退出微信才能继续下一步/)
     ).not.toBeInTheDocument()
+  })
+
+  it('restores the current account cache before auto-refresh and keeps it when refresh fails', async () => {
+    const dump = createDeferred<{
+      wxid: string
+      dbKey: string
+      dbKeyFile: string
+      urlsFile: string
+      logFile: string
+      urls: Array<string>
+    }>()
+    const cachedUrl =
+      'https://wxapp.tc.qq.com/1/stodownload?m=restored&filekey=1'
+    const artifacts = {
+      wxid: 'wxid_test_123',
+      dbKey: 'e'.repeat(64),
+      dbKeyFile: '/tmp/cached/emoticon_dbkey.txt',
+      urlsFile: '/tmp/cached/emoticon_urls.txt',
+      logFile: '/tmp/cached/emoticon_urls.log',
+      urls: [cachedUrl]
+    }
+    localStorage.setItem(
+      'wxemoticon_preview_cache|v4|wxid_test_123',
+      JSON.stringify({
+        version: 1,
+        targetId: 'v4|wxid_test_123',
+        urls: [cachedUrl],
+        updatedAt: '2026-07-30T00:00:00.000Z',
+        artifacts
+      })
+    )
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockReturnValueOnce(dump.promise)
+    setExistsBehavior({ wechatApp: true, cachedKey: true })
+
+    const { user } = await renderApp()
+
+    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '正在重新获取…' })
+    ).toBeDisabled()
+    expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    await user.click(screen.getByRole('button', { name: '复制 db key' }))
+    expect(mocks.writeTextMock).toHaveBeenCalledWith('e'.repeat(64))
+
+    dump.reject(new Error('cached key is stale'))
+
+    expect(
+      await screen.findByText('已显示缓存，自动刷新失败，可手动重试')
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '表情预览' }))
+    expect(screen.getByText('1 个表情包预览')).toBeInTheDocument()
+  })
+
+  it('persists a legacy account preview and shows explicit cache information', async () => {
+    const extract = createDeferred<Array<string>>()
+    const cachedUrl =
+      'https://wxapp.tc.qq.com/1/stodownload?m=legacy&filekey=1'
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeLegacyTarget()])
+    mocks.extractFavUrlsMock.mockReturnValueOnce(extract.promise)
+
+    const { user } = await renderApp()
+    expect(
+      await screen.findByDisplayValue(/旧版微信: 0123456789abcdef/)
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    expect(screen.getByRole('button', { name: '正在获取…' })).toBeDisabled()
+
+    extract.resolve([cachedUrl])
+    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+
+    const cached = JSON.parse(
+      localStorage.getItem(
+        'wxemoticon_preview_cache|legacy|2.0b4.0.9|0123456789abcdef0123456789abcdef'
+      ) || '{}'
+    ) as { targetId?: string; urls?: Array<string> }
+    expect(cached.targetId).toBe(
+      'legacy|2.0b4.0.9|0123456789abcdef0123456789abcdef'
+    )
+    expect(cached.urls).toEqual([cachedUrl])
+
+    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    expect(
+      screen.getByText(/已恢复该账号的本地 URL 缓存（1 条）/)
+    ).toBeInTheDocument()
   })
 
   it('writes export metadata and closes the completion dialog after opening the directory', async () => {
@@ -416,6 +669,7 @@ describe('App GUI flow', () => {
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
 
+    await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(screen.getByRole('button', { name: '开始导出' }))
 
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
@@ -427,8 +681,8 @@ describe('App GUI flow', () => {
     expect(mocks.writeUrlsFileMock).toHaveBeenCalledWith(
       expect.stringMatching(/^微信表情包_导出_/),
       [
-        'https://wxapp.tc.qq.com/1/stodownload?m=first&filekey=1',
-        'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2'
+        'https://wxapp.tc.qq.com/1/stodownload?m=second&filekey=2',
+        'https://wxapp.tc.qq.com/1/stodownload?m=first&filekey=1'
       ]
     )
     expect(mocks.writeDbKeyFileMock).toHaveBeenCalledWith(
@@ -446,13 +700,90 @@ describe('App GUI flow', () => {
     expect(mocks.openExportDirMock).toHaveBeenCalledTimes(2)
   })
 
+  it('restores all export settings after remounting', async () => {
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    localStorage.setItem(
+      'wxemoticon_preview_cache|v4|wxid_test_123',
+      JSON.stringify({
+        version: 1,
+        targetId: 'v4|wxid_test_123',
+        urls: ['https://wxapp.tc.qq.com/restored'],
+        updatedAt: '2026-07-30T00:00:00.000Z'
+      })
+    )
+
+    const user = userEvent.setup()
+    const firstRender = render(<App />)
+    await user.click(await screen.findByRole('tab', { name: '导出' }))
+    await user.click(
+      screen.getByRole('radio', { name: '自定义分组大小' })
+    )
+    const customSize = screen.getByRole('spinbutton', {
+      name: '自定义分组大小'
+    })
+    await user.type(customSize, '37', {
+      initialSelectionStart: 0,
+      initialSelectionEnd: 2
+    })
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: '断点续跑（跳过已存在文件）'
+      })
+    )
+    await user.click(
+      screen.getByRole('checkbox', { name: '导出完成后自动打开目录' })
+    )
+
+    await waitFor(() =>
+      expect(
+        JSON.parse(
+          localStorage.getItem('wxemoticon_export_settings') || '{}'
+        )
+      ).toEqual({
+        version: 1,
+        groupMode: 'custom',
+        customGroupSize: 37,
+        resume: false,
+        autoOpen: false
+      })
+    )
+
+    firstRender.unmount()
+    render(<App />)
+    await user.click(await screen.findByRole('tab', { name: '导出' }))
+
+    expect(
+      screen.getByRole('radio', { name: '自定义分组大小' })
+    ).toBeChecked()
+    expect(
+      screen.getByRole('spinbutton', { name: '自定义分组大小' })
+    ).toHaveValue(37)
+    expect(
+      screen.getByRole('checkbox', {
+        name: '断点续跑（跳过已存在文件）'
+      })
+    ).not.toBeChecked()
+    expect(
+      screen.getByRole('checkbox', { name: '导出完成后自动打开目录' })
+    ).not.toBeChecked()
+  })
+
   it('clears the current account cache from app and mirror directories after confirmation', async () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    localStorage.setItem(
+      'wxemoticon_preview_cache|v4|wxid_test_123',
+      JSON.stringify({
+        version: 1,
+        targetId: 'v4|wxid_test_123',
+        urls: ['https://wxapp.tc.qq.com/restored'],
+        updatedAt: '2026-07-30T00:00:00.000Z'
+      })
+    )
 
     const { user } = await renderApp()
     expect(await screen.findByDisplayValue(/wxid_test_123/)).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '展开高级选项' }))
+    await user.click(screen.getByRole('tab', { name: '高级设置' }))
     await user.click(screen.getByRole('button', { name: '清除当前账号缓存' }))
 
     expect(await screen.findByText('确认清除缓存？')).toBeInTheDocument()
@@ -466,10 +797,15 @@ describe('App GUI flow', () => {
       expect.arrayContaining([
         '/Users/tester/Library/Application Support/me.lius.wxemoticon/export-wechat-emoji/emoticon_dbkey_wxid_test_123.txt',
         '/Users/tester/Library/Application Support/me.lius.wxemoticon/export-wechat-emoji/emoticon_urls_wxid_test_123.txt',
-        '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji/emoticon_dbkey.txt',
-        '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji/emoticon_urls.log'
+        '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji/emoticon_dbkey_wxid_test_123.txt',
+        '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji/emoticon_urls_wxid_test_123.log'
       ])
     )
+    expect(
+      localStorage.getItem(
+        'wxemoticon_preview_cache|v4|wxid_test_123'
+      )
+    ).toBeNull()
     expect(await screen.findByText('已清除当前账号缓存')).toBeInTheDocument()
   })
 
@@ -488,7 +824,7 @@ describe('App GUI flow', () => {
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '展开高级选项' }))
+    await user.click(screen.getByRole('tab', { name: '高级设置' }))
 
     await user.click(screen.getByRole('button', { name: '复制 db key' }))
     await user.click(screen.getByRole('button', { name: '复制 URL 文件路径' }))
@@ -540,6 +876,7 @@ describe('App GUI flow', () => {
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
 
+    await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(screen.getByRole('button', { name: '开始导出' }))
     await waitFor(() =>
       expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(2)
@@ -589,5 +926,159 @@ describe('App GUI flow', () => {
       within(completionDialog).getByText(/总数：2，成功：1，跳过：1，失败：0/)
     ).toBeInTheDocument()
     expect(mocks.openExportDirMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an export running while the user switches back to preview', async () => {
+    const download = createDeferred<{
+      ok: boolean
+      buffer: ArrayBuffer
+      usedUrl: string
+      contentType: string
+    }>()
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'e'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: ['https://wxapp.tc.qq.com/1/stodownload?m=only&filekey=1']
+    })
+    mocks.fetchBinaryWithFallbackMock.mockReturnValueOnce(download.promise)
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '导出' }))
+    await user.click(screen.getByRole('button', { name: '开始导出' }))
+    await waitFor(() =>
+      expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(1)
+    )
+
+    await user.click(screen.getByRole('tab', { name: '表情预览' }))
+    expect(screen.getByRole('tab', { name: '表情预览' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+
+    download.resolve({
+      ok: true,
+      buffer: new Uint8Array([71, 73, 70, 56]).buffer,
+      usedUrl: 'https://wxapp.tc.qq.com/1/stodownload?m=only&filekey=1',
+      contentType: 'image/gif'
+    })
+    expect(
+      await screen.findByRole('dialog', { name: '导出完成' })
+    ).toBeInTheDocument()
+  })
+
+  it('migrates legacy incomplete exports and asks before resuming with a different sort order', async () => {
+    const targetValue = 'v4|wxid_test_123'
+    localStorage.setItem(
+      `wxemoticon_incomplete_export|${targetValue}`,
+      JSON.stringify({ dirName: '旧版未完成目录', groupSize: 50 })
+    )
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'f'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: [
+        'https://wxapp.tc.qq.com/1/stodownload?m=oldest&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=newest&filekey=2'
+      ]
+    })
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '导出' }))
+    await user.click(
+      screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
+    )
+
+    expect(
+      await screen.findByRole('dialog', {
+        name: '排序方式与上次导出不同'
+      })
+    ).toBeInTheDocument()
+    expect(
+      JSON.parse(
+        localStorage.getItem(`wxemoticon_incomplete_export|${targetValue}`) ||
+          '{}'
+      )
+    ).toEqual({
+      dirName: '旧版未完成目录',
+      groupSize: 50,
+      sortOrder: 'oldest-first'
+    })
+
+    await user.click(screen.getByRole('button', { name: '按上次排序继续' }))
+    expect(
+      await screen.findByRole('dialog', { name: '导出完成' })
+    ).toBeInTheDocument()
+    expect(mocks.writeUrlsFileMock).toHaveBeenCalledWith('旧版未完成目录', [
+      'https://wxapp.tc.qq.com/1/stodownload?m=oldest&filekey=1',
+      'https://wxapp.tc.qq.com/1/stodownload?m=newest&filekey=2'
+    ])
+    expect(localStorage.getItem('wxemoticon_emoji_sort_order')).toBe(
+      'newest-first'
+    )
+  })
+
+  it('starts a new directory when resolving a resume sort conflict with the current order', async () => {
+    const targetValue = 'v4|wxid_test_123'
+    localStorage.setItem(
+      `wxemoticon_incomplete_export|${targetValue}`,
+      JSON.stringify({
+        dirName: '不要继续写入的旧目录',
+        groupSize: 50,
+        sortOrder: 'oldest-first'
+      })
+    )
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'g'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: [
+        'https://wxapp.tc.qq.com/1/stodownload?m=oldest&filekey=1',
+        'https://wxapp.tc.qq.com/1/stodownload?m=newest&filekey=2'
+      ]
+    })
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '导出' }))
+    await user.click(
+      screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
+    )
+    await user.click(
+      await screen.findByRole('button', {
+        name: '按当前排序开始新的导出'
+      })
+    )
+
+    expect(
+      await screen.findByRole('dialog', { name: '导出完成' })
+    ).toBeInTheDocument()
+    expect(mocks.ensureExportRootDirMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^微信表情包_导出_/)
+    )
+    expect(mocks.ensureExportRootDirMock).not.toHaveBeenCalledWith(
+      '不要继续写入的旧目录'
+    )
+    expect(mocks.writeUrlsFileMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^微信表情包_导出_/),
+      [
+        'https://wxapp.tc.qq.com/1/stodownload?m=newest&filekey=2',
+        'https://wxapp.tc.qq.com/1/stodownload?m=oldest&filekey=1'
+      ]
+    )
   })
 })

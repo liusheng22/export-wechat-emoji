@@ -28,11 +28,13 @@ export type AutoDumpUrlsResult = {
 
 export async function autoDumpEmoticonUrlsV4(
   wxidDir: string,
-  wechatAppPath?: string
+  wechatAppPath?: string,
+  allowKeyDump = true
 ): Promise<AutoDumpUrlsResult> {
   return await invoke<AutoDumpUrlsResult>('auto_dump_emoticon_urls_v4', {
     wechatAppPath,
-    wxidDir
+    wxidDir,
+    allowKeyDump
   })
 }
 

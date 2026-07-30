@@ -670,15 +670,30 @@ fn diagnose_wechat_environment() -> Result<WeChatEnvironmentDiag, String> {
     }
 }
 
+const KEY_DUMP_REQUIRES_MANUAL_ACTION: &str =
+    "cached db key is unavailable or invalid; retry manually to obtain a new key";
+
+fn ensure_key_dump_allowed(allow_key_dump: bool) -> Result<(), String> {
+    if allow_key_dump {
+        Ok(())
+    } else {
+        Err(KEY_DUMP_REQUIRES_MANUAL_ACTION.to_string())
+    }
+}
+
 #[tauri::command]
 async fn auto_dump_emoticon_urls_v4(
     app: tauri::AppHandle,
     wechat_app_path: Option<String>,
     wxid_dir: String,
+    allow_key_dump: Option<bool>,
 ) -> Result<AutoDumpUrlsResult, String> {
-    tauri::async_runtime::spawn_blocking(move || auto_dump_emoticon_urls_v4_blocking(app, wechat_app_path, wxid_dir))
-        .await
-        .map_err(|e| format!("internal task failed: {e}"))?
+    let allow_key_dump = allow_key_dump.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        auto_dump_emoticon_urls_v4_blocking(app, wechat_app_path, wxid_dir, allow_key_dump)
+    })
+    .await
+    .map_err(|e| format!("internal task failed: {e}"))?
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -686,6 +701,7 @@ fn auto_dump_emoticon_urls_v4_blocking(
     _app: tauri::AppHandle,
     _wechat_app_path: Option<String>,
     _wxid_dir: String,
+    _allow_key_dump: bool,
 ) -> Result<AutoDumpUrlsResult, String> {
     Err("auto dump is only supported on macOS".to_string())
 }
@@ -695,6 +711,7 @@ fn auto_dump_emoticon_urls_v4_blocking(
     app: tauri::AppHandle,
     wechat_app_path: Option<String>,
     wxid_dir: String,
+    allow_key_dump: bool,
 ) -> Result<AutoDumpUrlsResult, String> {
     fn emit_flow(app: &tauri::AppHandle, wxid: &str, stage: &str, message: &str) {
         let _ = app.emit_all(
@@ -1023,6 +1040,11 @@ fn auto_dump_emoticon_urls_v4_blocking(
         Ok(key)
     };
 
+    let dump_key_if_allowed = || -> Result<String, String> {
+        ensure_key_dump_allowed(allow_key_dump)?;
+        dump_key()
+    };
+
     let mut used_existing_key = false;
     let mut db_key: Option<String> = None;
 
@@ -1065,7 +1087,7 @@ fn auto_dump_emoticon_urls_v4_blocking(
     }
 
     if db_key.is_none() {
-        db_key = Some(dump_key()?);
+        db_key = Some(dump_key_if_allowed()?);
     }
 
     let mut db_key = db_key.ok_or_else(|| "failed to get db key".to_string())?;
@@ -1245,8 +1267,15 @@ fn auto_dump_emoticon_urls_v4_blocking(
 
     let (mut urls, saw_hmac_mismatch) = extract_for_key(&db_key)?;
     if urls.is_empty() && used_existing_key && saw_hmac_mismatch {
-        append_log(&urls_log, "[warn] existing db key seems invalid; re-dumping key and retrying...");
-        db_key = dump_key()?;
+        append_log(
+            &urls_log,
+            if allow_key_dump {
+                "[warn] existing db key seems invalid; re-dumping key and retrying..."
+            } else {
+                "[warn] existing db key seems invalid; automatic key dump is disabled"
+            },
+        );
+        db_key = dump_key_if_allowed()?;
         let (retry_urls, _retry_saw) = extract_for_key(&db_key)?;
         urls = retry_urls;
     }
@@ -1272,6 +1301,24 @@ fn auto_dump_emoticon_urls_v4_blocking(
         log_file: urls_log.display().to_string(),
         urls,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_refresh_cannot_dump_a_new_key() {
+        assert_eq!(
+            ensure_key_dump_allowed(false),
+            Err(KEY_DUMP_REQUIRES_MANUAL_ACTION.to_string())
+        );
+    }
+
+    #[test]
+    fn manual_refresh_can_dump_a_new_key() {
+        assert_eq!(ensure_key_dump_allowed(true), Ok(()));
+    }
 }
 
 fn main() {

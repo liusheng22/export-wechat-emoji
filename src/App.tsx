@@ -2,6 +2,7 @@ import type { IMaybeUrl } from './types'
 import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
+import ButtonBase from '@mui/material/ButtonBase'
 import CircularProgress from '@mui/material/CircularProgress'
 import Container from '@mui/material/Container'
 import Dialog from '@mui/material/Dialog'
@@ -13,6 +14,7 @@ import FormControl from '@mui/material/FormControl'
 import FormControlLabel from '@mui/material/FormControlLabel'
 import ImageList from '@mui/material/ImageList'
 import ImageListItem from '@mui/material/ImageListItem'
+import IconButton from '@mui/material/IconButton'
 import InputLabel from '@mui/material/InputLabel'
 import LinearProgress from '@mui/material/LinearProgress'
 import MenuItem from '@mui/material/MenuItem'
@@ -27,9 +29,11 @@ import Step from '@mui/material/Step'
 import StepLabel from '@mui/material/StepLabel'
 import Stepper from '@mui/material/Stepper'
 import Switch from '@mui/material/Switch'
+import SvgIcon from '@mui/material/SvgIcon'
 import Tab from '@mui/material/Tab'
 import Tabs from '@mui/material/Tabs'
 import TextField from '@mui/material/TextField'
+import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import { writeText } from '@tauri-apps/api/clipboard'
 import { message, open } from '@tauri-apps/api/dialog'
@@ -52,7 +56,8 @@ import {
   extractFavUrls,
   type AutoDumpUrlsResult
 } from './services/archive'
-import { fetchBinaryWithFallback } from './services/downloader'
+import { loadEmojiBinary } from './services/emoji-binary-cache'
+import { copyEmojiFile } from './services/emoji-file-cache'
 import {
   buildUniqueFileKeys,
   ensureExportRootDir,
@@ -63,12 +68,7 @@ import {
   writeUrlsFile,
   writeUsageReadme
 } from './services/exporter'
-import {
-  extFromBytes,
-  extFromContentType,
-  extFromUrl,
-  getStodownloadCandidates
-} from './services/stodownload'
+import { getStodownloadCandidates } from './services/stodownload'
 import {
   checkWeChatRunning,
   diagnoseWeChatEnvironment,
@@ -159,6 +159,22 @@ function orderUrls(
   return sortOrder === 'newest-first' ? [...urls].reverse() : [...urls]
 }
 
+function ZoomInIcon() {
+  return (
+    <SvgIcon fontSize="small" viewBox="0 0 24 24">
+      <path d="M9.5 3a6.5 6.5 0 1 0 3.98 11.64L19.85 21 21 19.85l-6.36-6.37A6.5 6.5 0 0 0 9.5 3Zm0 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9ZM9 7v2H7v1h2v2h1v-2h2V9h-2V7H9Z" />
+    </SvgIcon>
+  )
+}
+
+function LinkIcon() {
+  return (
+    <SvgIcon fontSize="small" viewBox="0 0 24 24">
+      <path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.2-3.2a3 3 0 1 1 4.2 4.2l-2.2 2.2a3 3 0 0 1-4.2 0 1 1 0 1 1 1.4-1.4 1 1 0 0 0 1.4 0l2.2-2.2a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0Zm2.8-2.8a1 1 0 0 1 0 1.4l-3.2 3.2A3 3 0 1 1 6 11l2.2-2.2a3 3 0 0 1 4.2 0A1 1 0 1 1 11 10.2a1 1 0 0 0-1.4 0l-2.2 2.2a1 1 0 1 0 1.4 1.4l3.2-3.2a1 1 0 0 1 1.4 0Z" />
+    </SvgIcon>
+  )
+}
+
 function App() {
   // wxapp 域名
   const wxappDomain = 'wxapp.tc.qq.com'
@@ -173,6 +189,9 @@ function App() {
   // 预览/下载数据（来源统一为 URL 列表，但对用户隐藏）
   const [rawUrls, setRawUrls] = useState<Array<string>>([])
   const [showImgList, setShowImgList] = useState<Array<IMaybeUrl>>([])
+  const [copyingEmojiKeys, setCopyingEmojiKeys] = useState<Set<string>>(
+    () => new Set()
+  )
   const [previewPage, setPreviewPage] = useState(1)
   const previewPageSize = 50
   const [activeTab, setActiveTab] = useState<AppTab>('preview')
@@ -234,6 +253,7 @@ function App() {
   const [wechatAppPath, setWechatAppPath] = useState('/Applications/WeChat.app')
   const cancelExportRef = useRef(false)
   const createdSubDirsRef = useRef<Set<number>>(new Set())
+  const copyingEmojiKeysRef = useRef<Set<string>>(new Set())
   const activeFlowWxidRef = useRef<string | null>(null)
   const flowActiveRef = useRef(false)
   const activeTargetIdRef = useRef('')
@@ -702,6 +722,27 @@ function App() {
     }
   }
 
+  async function copyEmojiImage(src: string, itemKey: string) {
+    if (copyingEmojiKeysRef.current.has(itemKey)) {
+      return
+    }
+    copyingEmojiKeysRef.current.add(itemKey)
+    setCopyingEmojiKeys((current) => new Set(current).add(itemKey))
+    try {
+      await copyEmojiFile(src)
+      showToastMessage('已复制原图文件', 'success')
+    } catch {
+      showToastMessage('图片复制失败，请重试', 'warning')
+    } finally {
+      copyingEmojiKeysRef.current.delete(itemKey)
+      setCopyingEmojiKeys((current) => {
+        const next = new Set(current)
+        next.delete(itemKey)
+        return next
+      })
+    }
+  }
+
   async function clearCurrentAccountCache() {
     const target = selectedTargetMeta
     if (!target) {
@@ -1042,35 +1083,33 @@ function App() {
           }
         }
 
-        const result = await fetchBinaryWithFallback(src)
+        let result
+        try {
+          result = await loadEmojiBinary(src)
+        } catch {
+          failed += 1
+          setExportFailed(failed)
+          setExportProgress(i + 1)
+          continue
+        }
         if (cancelExportRef.current) {
           break
         }
 
-        if (result.ok) {
-          const ext =
-            extFromBytes(result.buffer) ||
-            extFromContentType(result.contentType) ||
-            extFromUrl(result.usedUrl) ||
-            'gif'
-          try {
-            await exportOneEmoji({
-              customEmotionsDirName: options.dirName,
-              groupSize: options.groupSize,
-              createdSubDirs: createdSubDirsRef.current,
-              index: i,
-              usedUrl: result.usedUrl,
-              fileKey,
-              buffer: result.buffer,
-              ext
-            })
-            ok += 1
-            setExportOk(ok)
-          } catch {
-            failed += 1
-            setExportFailed(failed)
-          }
-        } else {
+        try {
+          await exportOneEmoji({
+            customEmotionsDirName: options.dirName,
+            groupSize: options.groupSize,
+            createdSubDirs: createdSubDirsRef.current,
+            index: i,
+            usedUrl: result.usedUrl,
+            fileKey,
+            buffer: result.buffer,
+            ext: result.ext
+          })
+          ok += 1
+          setExportOk(ok)
+        } catch {
           failed += 1
           setExportFailed(failed)
         }
@@ -1183,6 +1222,138 @@ function App() {
   function cancelExport() {
     cancelExportRef.current = true
     setCancelRequested(true)
+  }
+
+  function renderPreviewGrid() {
+    if (!showImgList.length) {
+      return (
+        <Typography variant="body1" color="text.secondary">
+          {!targets.length
+            ? '暂未检测到微信账号；请确认微信已登录，然后点击「刷新」'
+            : selectedTargetValue
+              ? '暂无预览，请先点击「一键获取并预览」'
+              : '先选择账号，然后点击「一键获取并预览」'}
+        </Typography>
+      )
+    }
+
+    const pageStart = (previewPage - 1) * previewPageSize
+    const pageEnd = previewPage * previewPageSize
+    const pageCount = Math.ceil(showImgList.length / previewPageSize)
+
+    return (
+      <Box className="img-list">
+        {pageCount > 1 && (
+          <Stack
+            direction="row"
+            spacing={2}
+            alignItems="center"
+            justifyContent="space-between"
+            sx={{ mb: 1 }}
+          >
+            <Typography variant="body2" color="text.secondary">
+              第 {pageStart + 1}-{Math.min(pageEnd, showImgList.length)} 个 / 共{' '}
+              {showImgList.length} 个
+            </Typography>
+            <Pagination
+              count={pageCount}
+              page={previewPage}
+              onChange={(_event, page) => setPreviewPage(page)}
+              disabled={isExporting}
+              size="small"
+            />
+          </Stack>
+        )}
+
+        <ImageList cols={5} gap={8} sx={{ width: '100%', m: 0 }}>
+          <PhotoProvider>
+            {showImgList.slice(pageStart, pageEnd).map((item, index) => {
+              const absoluteIndex = pageStart + index
+              const itemKey = `${item._text}|${absoluteIndex}`
+              const isCopying = copyingEmojiKeys.has(itemKey)
+              return (
+                <ImageListItem
+                  key={itemKey}
+                  sx={{ minWidth: 0, position: 'relative' }}
+                >
+                  <ButtonBase
+                    className="img-preview"
+                    aria-label={`下载并复制表情 ${absoluteIndex + 1}`}
+                    disabled={isCopying}
+                    onClick={() => void copyEmojiImage(item._text, itemKey)}
+                  >
+                    <img
+                      src={item.src}
+                      loading="lazy"
+                      alt=""
+                      onError={() => {
+                        const candidates = getStodownloadCandidates(item._text)
+                        const nextIndex = (item.fallbackIndex ?? 0) + 1
+                        if (nextIndex >= candidates.length) {
+                          return
+                        }
+
+                        setShowImgList((current) =>
+                          current.map((candidate) =>
+                            candidate._text === item._text
+                              ? {
+                                  ...candidate,
+                                  src: candidates[nextIndex],
+                                  fallbackIndex: nextIndex
+                                }
+                              : candidate
+                          )
+                        )
+                      }}
+                    />
+                    {isCopying && (
+                      <Box className="emoji-copy-loading" aria-label="正在复制图片">
+                        <CircularProgress size={24} />
+                      </Box>
+                    )}
+                  </ButtonBase>
+
+                  <Stack
+                    className="emoji-item-actions"
+                    direction="row"
+                    spacing={0.25}
+                  >
+                    <Tooltip title="查看大图">
+                      <span onClick={(event) => event.stopPropagation()}>
+                        <PhotoView src={item.src}>
+                          <IconButton
+                            size="small"
+                            aria-label="查看大图"
+                            className="emoji-item-action"
+                          >
+                            <ZoomInIcon />
+                          </IconButton>
+                        </PhotoView>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title="打开图片链接">
+                      <IconButton
+                        size="small"
+                        aria-label="打开图片链接"
+                        className="emoji-item-action"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void openSystem(item.src).catch(() =>
+                            showToastMessage('打开图片链接失败', 'warning')
+                          )
+                        }}
+                      >
+                        <LinkIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
+                </ImageListItem>
+              )
+            })}
+          </PhotoProvider>
+        </ImageList>
+      </Box>
+    )
   }
 
   return (
@@ -1404,6 +1575,8 @@ function App() {
                       </Box>
                     </Box>
                   )}
+
+                  {renderPreviewGrid()}
                 </Stack>
               )}
 
@@ -1764,142 +1937,6 @@ function App() {
             </Stack>
           </Stack>
         </Paper>
-
-        {activeTab === 'preview' && (
-          <Paper variant="outlined" sx={{ p: 2 }}>
-            <Stack spacing={1.5}>
-              {showImgList.length ? (
-                <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                  {showImgList.length} 个表情包预览
-                </Typography>
-              ) : (
-                <Typography variant="body1" color="text.secondary">
-                  {!targets.length
-                    ? '暂未检测到微信账号；请确认微信已登录，然后点击「刷新」'
-                    : selectedTargetValue
-                      ? '暂无预览，请先点击「一键获取并预览」'
-                      : '先选择账号，然后点击「一键获取并预览」'}
-                </Typography>
-              )}
-
-              {!!showImgList.length && (
-                <Box className="img-list">
-                  {Math.ceil(showImgList.length / previewPageSize) > 1 && (
-                    <Stack
-                      direction="row"
-                      spacing={2}
-                      alignItems="center"
-                      justifyContent="space-between"
-                      sx={{ mb: 1 }}
-                    >
-                      <Typography variant="body2" color="text.secondary">
-                        第 {(previewPage - 1) * previewPageSize + 1}-
-                        {Math.min(
-                          previewPage * previewPageSize,
-                          showImgList.length
-                        )}{' '}
-                        个 / 共 {showImgList.length} 个
-                      </Typography>
-                      <Pagination
-                        count={Math.ceil(showImgList.length / previewPageSize)}
-                        page={previewPage}
-                        onChange={(_e, page) => setPreviewPage(page)}
-                        disabled={isExporting}
-                        size="small"
-                      />
-                    </Stack>
-                  )}
-                  <ImageList cols={5} gap={8} sx={{ width: '100%', m: 0 }}>
-                    <PhotoProvider>
-                      {showImgList
-                        .slice(
-                          (previewPage - 1) * previewPageSize,
-                          previewPage * previewPageSize
-                        )
-                        .map((item, index) => (
-                          <ImageListItem
-                            key={`${item._text}_${index}`}
-                            sx={{ minWidth: 0 }}
-                          >
-                            <Stack spacing={0.75}>
-                              <div className="img-preview">
-                                <PhotoView src={item.src}>
-                                  <img
-                                    src={item.src}
-                                    loading="lazy"
-                                    alt=""
-                                    onError={() => {
-                                      const candidates =
-                                        getStodownloadCandidates(item._text)
-                                      const nextIndex =
-                                        (item.fallbackIndex ?? 0) + 1
-                                      if (nextIndex >= candidates.length) {
-                                        return
-                                      }
-
-                                      setShowImgList((prev) =>
-                                        prev.map((p) => {
-                                          if (p._text !== item._text) {
-                                            return p
-                                          }
-                                          return {
-                                            ...p,
-                                            src: candidates[nextIndex],
-                                            fallbackIndex: nextIndex
-                                          }
-                                        })
-                                      )
-                                    }}
-                                  />
-                                </PhotoView>
-                              </div>
-
-                              <Stack
-                                direction="row"
-                                spacing={0.75}
-                                justifyContent="center"
-                                alignItems="center"
-                                sx={{ flexWrap: 'nowrap' }}
-                              >
-                                <Button
-                                  size="small"
-                                  variant="text"
-                                  onClick={() =>
-                                    copyToClipboard(item._text, '已复制链接')
-                                  }
-                                  disabled={isExporting}
-                                  sx={{
-                                    minWidth: 0,
-                                    px: 0.75,
-                                    whiteSpace: 'nowrap'
-                                  }}
-                                >
-                                  复制链接
-                                </Button>
-                                <Button
-                                  size="small"
-                                  variant="text"
-                                  onClick={() => openSystem(item._text)}
-                                  disabled={isExporting}
-                                  sx={{
-                                    minWidth: 0,
-                                    px: 0.75,
-                                    whiteSpace: 'nowrap'
-                                  }}
-                                >
-                                  打开链接
-                                </Button>
-                              </Stack>
-                            </Stack>
-                          </ImageListItem>
-                        ))}
-                    </PhotoProvider>
-                  </ImageList>
-                </Box>
-              )}
-            </Stack>
-          </Paper>
-        )}
 
         <Dialog
           open={resumeSortConflictOpen}

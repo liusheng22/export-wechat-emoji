@@ -17,8 +17,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
-use tempfile::NamedTempFile;
 use tauri::Manager;
+use tempfile::NamedTempFile;
+
+mod emoji_file_cache;
+use emoji_file_cache::{
+    __cmd__cache_and_copy_emoji_file, __cmd__copy_cached_emoji_file,
+    cache_and_copy_emoji_file, copy_cached_emoji_file,
+};
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -1325,6 +1331,8 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             greet,
+            copy_cached_emoji_file,
+            cache_and_copy_emoji_file,
             file_mtime_ms,
             check_wechat_running,
             diagnose_wechat_environment,

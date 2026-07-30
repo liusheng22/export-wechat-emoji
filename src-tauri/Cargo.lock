@@ -4772,6 +4772,7 @@ dependencies = [
  "anyhow",
  "cbc",
  "cipher",
+ "cocoa",
  "hex",
  "hmac",
  "pbkdf2",

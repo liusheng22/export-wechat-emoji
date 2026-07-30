@@ -9,6 +9,7 @@ import {
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { clearEmojiBinaryCacheForTests } from './services/emoji-binary-cache'
 
 const mocks = vi.hoisted(() => ({
   messageMock: vi.fn(async () => {}),
@@ -39,6 +40,7 @@ const mocks = vi.hoisted(() => ({
     async () => '/Users/tester/Library/Application Support/me.lius.wxemoticon'
   ),
   commandExecuteMock: vi.fn(async () => ({})),
+  invokeMock: vi.fn(async () => {}),
   getClientMock: vi.fn(async () => ({
     get: vi.fn()
   })),
@@ -103,6 +105,10 @@ vi.mock('@tauri-apps/api/shell', () => ({
 
     execute = mocks.commandExecuteMock
   }
+}))
+
+vi.mock('@tauri-apps/api/tauri', () => ({
+  invoke: mocks.invokeMock
 }))
 
 vi.mock('@tauri-apps/api/http', () => ({
@@ -243,6 +249,8 @@ async function renderApp() {
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  clearEmojiBinaryCacheForTests()
+  mocks.fetchBinaryWithFallbackMock.mockReset()
 
   mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([])
   mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
@@ -333,7 +341,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
 
     const previewSources = () =>
       Array.from(
@@ -350,6 +360,75 @@ describe('App GUI flow', () => {
     )
     await user.click(screen.getByRole('tab', { name: '表情预览' }))
     expect(previewSources()[0]).toContain('m=oldest')
+  })
+
+  it('copies image data from the preview and reuses it for export while keeping overlay actions independent', async () => {
+    const emojiUrl =
+      'https://wxapp.tc.qq.com/1/stodownload?m=shared&filekey=1'
+    mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
+    mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
+      wxid: 'wxid_test_123',
+      dbKey: 'a'.repeat(64),
+      dbKeyFile: '/tmp/emoticon_dbkey.txt',
+      urlsFile: '/tmp/emoticon_urls.txt',
+      logFile: '/tmp/emoticon_urls.log',
+      urls: [emojiUrl]
+    })
+    mocks.fetchBinaryWithFallbackMock.mockResolvedValue({
+      ok: true,
+      buffer: new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]).buffer,
+      usedUrl: `${emojiUrl}&download=1`,
+      contentType: 'image/gif'
+    })
+
+    const { user } = await renderApp()
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+    const imageAction = await screen.findByRole('button', {
+      name: '下载并复制表情 1'
+    })
+
+    const previewPaper = imageAction.closest('.MuiPaper-root') as HTMLElement
+    expect(
+      within(previewPaper).getByRole('tab', { name: '表情预览' })
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/个表情包预览/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: '复制链接' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: '打开链接' })
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '查看大图' }))
+    expect(mocks.invokeMock).not.toHaveBeenCalled()
+    expect(mocks.commandExecuteMock).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '打开图片链接' }))
+    expect(mocks.commandExecuteMock).toHaveBeenCalledTimes(1)
+    expect(mocks.invokeMock).not.toHaveBeenCalled()
+
+    await user.click(imageAction)
+    await waitFor(() =>
+      expect(mocks.invokeMock).toHaveBeenCalledWith(
+        'cache_and_copy_emoji_file',
+        {
+          sourceUrl: emojiUrl,
+          bytes: [0x47, 0x49, 0x46, 0x38, 0x39, 0x61],
+          ext: 'gif'
+        }
+      )
+    )
+    expect(mocks.writeTextMock).not.toHaveBeenCalled()
+    expect(await screen.findByText('已复制原图文件')).toBeInTheDocument()
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('tab', { name: '导出' }))
+    await user.click(screen.getByRole('button', { name: '开始导出' }))
+    expect(
+      await screen.findByRole('dialog', { name: '导出完成' })
+    ).toBeInTheDocument()
+    expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(1)
+    expect(mocks.exportOneEmojiMock).toHaveBeenCalledTimes(1)
   })
 
   it('keeps preview loading active while the user switches tabs', async () => {
@@ -408,7 +487,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
 
     const firstImage =
       document.querySelector<HTMLImageElement>('.img-preview img')
@@ -508,7 +589,9 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
     expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledWith(
       'wxid_test_123',
       '/Applications/WeChat.app',
@@ -537,7 +620,9 @@ describe('App GUI flow', () => {
     expect(await screen.findByDisplayValue(/wxid_test_123/)).toBeInTheDocument()
     expect(screen.queryByLabelText('选择账号')).not.toBeInTheDocument()
 
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 1' })
+    ).toBeInTheDocument()
     expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledTimes(1)
     expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledWith(
       'wxid_test_123',
@@ -585,7 +670,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
 
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 1' })
+    ).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: '正在重新获取…' })
     ).toBeDisabled()
@@ -601,7 +688,9 @@ describe('App GUI flow', () => {
       await screen.findByText('已显示缓存，自动刷新失败，可手动重试')
     ).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: '表情预览' }))
-    expect(screen.getByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '下载并复制表情 1' })
+    ).toBeInTheDocument()
   })
 
   it('persists a legacy account preview and shows explicit cache information', async () => {
@@ -619,7 +708,9 @@ describe('App GUI flow', () => {
     expect(screen.getByRole('button', { name: '正在获取…' })).toBeDisabled()
 
     extract.resolve([cachedUrl])
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 1' })
+    ).toBeInTheDocument()
 
     const cached = JSON.parse(
       localStorage.getItem(
@@ -667,7 +758,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(screen.getByRole('button', { name: '开始导出' }))
@@ -822,7 +915,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 1' })
+    ).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: '高级设置' }))
 
@@ -874,7 +969,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(screen.getByRole('button', { name: '开始导出' }))
@@ -948,7 +1045,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('1 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 1' })
+    ).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(screen.getByRole('button', { name: '开始导出' }))
     await waitFor(() =>
@@ -993,7 +1092,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(
       screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
@@ -1053,7 +1154,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    expect(await screen.findByText('2 个表情包预览')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '下载并复制表情 2' })
+    ).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: '导出' }))
     await user.click(
       screen.getByRole('button', { name: '继续上次导出（断点续跑）' })

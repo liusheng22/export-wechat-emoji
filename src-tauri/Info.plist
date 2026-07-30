@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSAppDataUsageDescription</key>
+  <string>用于读取微信本地表情数据，以预览和导出您选择账号的收藏表情。</string>
+</dict>
+</plist>

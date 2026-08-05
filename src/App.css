@@ -49,6 +49,7 @@ h1 {
 .img-preview {
   width: 100%;
   aspect-ratio: 1 / 1;
+  position: relative;
   overflow: hidden;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.06);
@@ -56,9 +57,48 @@ h1 {
   align-items: center;
   justify-content: center;
 }
+.img-preview:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
 .img-preview img {
   width: 100%;
   height: 100%;
   display: block;
   object-fit: contain;
+}
+
+.emoji-copy-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.emoji-item-actions {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  z-index: 1;
+}
+
+.emoji-item-action {
+  box-sizing: border-box;
+  width: 23px;
+  height: 23px;
+  padding: 3px !important;
+  color: rgba(255, 255, 255, 0.88) !important;
+  background: rgba(0, 0, 0, 0.28) !important;
+}
+
+.emoji-item-action .MuiSvgIcon-root {
+  font-size: 16px;
+}
+
+.emoji-item-action:hover,
+.emoji-item-action:focus-visible {
+  background: rgba(0, 0, 0, 0.44) !important;
 }

@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.1.4'
+export const APP_VERSION = '0.2.0'
 
 export const GITHUB_REPOSITORY_URL =
   'https://github.com/liusheng22/export-wechat-emoji'

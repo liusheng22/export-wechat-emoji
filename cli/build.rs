@@ -28,7 +28,20 @@ fn main() {
         panic!("missing key dumper source: {}", src.display());
     }
 
-    let status = Command::new("clang")
+    let sdk = Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .expect("failed to find the macOS SDK with xcrun");
+    if !sdk.status.success() {
+        panic!("failed to find the macOS SDK with xcrun");
+    }
+    let sdk_path = String::from_utf8(sdk.stdout)
+        .expect("macOS SDK path is not valid UTF-8")
+        .trim()
+        .to_string();
+
+    let status = Command::new("xcrun")
+        .args(["--sdk", "macosx", "clang", "-isysroot", &sdk_path])
         .args([
             "-dynamiclib",
             "-O2",

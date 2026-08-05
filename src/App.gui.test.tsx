@@ -414,6 +414,35 @@ describe('App GUI flow', () => {
     expect(await screen.findByText('已保存目录授权')).toBeInTheDocument()
   })
 
+  it('explains when the WeChat data directory is readable but no account is found', async () => {
+    const hint =
+      '没有找到可用的微信账号。请确认已登录微信 4.x，并至少打开过一次表情面板，然后刷新。'
+    mocks.diagnoseWeChatEnvironmentMock.mockResolvedValue({
+      v4DataDir: {
+        path: '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files',
+        exists: true,
+        readable: true,
+        error: null
+      },
+      legacyDataDir: {
+        path: '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat',
+        exists: true,
+        readable: true,
+        error: null
+      },
+      defaultWechatApp: {
+        path: '/Applications/WeChat.app',
+        exists: true,
+        readable: true,
+        error: null
+      }
+    })
+
+    await renderApp()
+
+    expect(await screen.findByText(hint)).toBeInTheDocument()
+  })
+
   it('opens on the favorites page without a tab bar and keeps settings as a separate page', async () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
 

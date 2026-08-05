@@ -294,6 +294,44 @@ describe('App GUI flow', () => {
     ).not.toHaveLength(0)
   })
 
+  it('shows a more specific hint when data directories are readable but no account db is found', async () => {
+    mocks.diagnoseWeChatEnvironmentMock.mockResolvedValue({
+      v4DataDir: {
+        path: '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files',
+        exists: true,
+        readable: true,
+        error: null
+      },
+      legacyDataDir: {
+        path: '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat',
+        exists: true,
+        readable: true,
+        error: null
+      },
+      defaultWechatApp: {
+        path: '/Applications/WeChat.app',
+        exists: true,
+        readable: true,
+        error: null
+      }
+    })
+
+    const { user } = await renderApp()
+
+    expect(
+      await screen.findByText(/但没有找到任何包含 emoticon\.db 的账号目录/)
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
+
+    await waitFor(() =>
+      expect(mocks.messageMock).toHaveBeenCalledWith(
+        expect.stringContaining('没有找到任何包含 emoticon.db 的账号目录'),
+        expect.objectContaining({ type: 'warning' })
+      )
+    )
+  })
+
   it('shows an explicit warning when WeChat is still running', async () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
     mocks.checkWeChatRunningMock.mockResolvedValue({

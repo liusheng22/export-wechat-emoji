@@ -2,6 +2,7 @@
 set -euo pipefail
 
 WECHAT_APP="${1:-/Applications/WeChat.app}"
+TARGET_WXID="${2:-}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DYLIB="$ROOT_DIR/tools/wechat-key-dumper/wechat_key_dumper.dylib"
@@ -67,6 +68,7 @@ trap cleanup EXIT
 
 EXPORT_WECHAT_EMOJI_KEY_OUT="$OUT_FILE" \
 EXPORT_WECHAT_EMOJI_KEY_LOG="$LOG_FILE" \
+EXPORT_WECHAT_EMOJI_TARGET_WXID="$TARGET_WXID" \
 DYLD_INSERT_LIBRARIES="$DYLIB" \
 "$RUN_APP/Contents/MacOS/WeChat" >/dev/null 2>&1 &
 WECHAT_PID=$!

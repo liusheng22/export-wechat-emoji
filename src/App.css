@@ -71,3 +71,38 @@ body {
     animation-iteration-count: 1 !important;
   }
 }
+
+.emoji-copy-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.emoji-item-actions {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  z-index: 1;
+}
+
+.emoji-item-action {
+  box-sizing: border-box;
+  width: 23px;
+  height: 23px;
+  padding: 3px !important;
+  color: rgba(255, 255, 255, 0.88) !important;
+  background: rgba(0, 0, 0, 0.28) !important;
+}
+
+.emoji-item-action .MuiSvgIcon-root {
+  font-size: 16px;
+}
+
+.emoji-item-action:hover,
+.emoji-item-action:focus-visible {
+  background: rgba(0, 0, 0, 0.44) !important;
+}

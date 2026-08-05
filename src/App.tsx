@@ -68,7 +68,8 @@ import {
   extractFavUrls,
   type AutoDumpUrlsResult
 } from './services/archive'
-import { fetchBinaryWithFallback } from './services/downloader'
+import { loadEmojiBinary } from './services/emoji-binary-cache'
+import { copyEmojiFile } from './services/emoji-file-cache'
 import {
   buildGitHubMissingAlbumIssueUrl,
   buildMissingAlbumFeedbackPayload,
@@ -140,9 +141,23 @@ type ExportResult = {
   groupSize: number
 }
 
+type AppTab = 'preview' | 'export' | 'advanced'
+
+type EmojiSortOrder = 'newest-first' | 'oldest-first'
+
+type PreviewTaskIntent = 'initial' | 'refresh' | 'auto-refresh'
+
+type LoadPreviewOptions = {
+  target?: EmojiTargetMeta
+  intent?: PreviewTaskIntent
+  activationGeneration?: number
+  cachedPreview?: boolean
+}
+
 type IncompleteExport = {
   dirName: string
   groupSize: number
+  sortOrder: EmojiSortOrder
 }
 
 type ToastState = {
@@ -231,6 +246,9 @@ function App() {
 
   // 预览/下载数据（来源统一为 URL 列表，但对用户隐藏）
   const [showImgList, setShowImgList] = useState<Array<IMaybeUrl>>([])
+  const [copyingEmojiKeys, setCopyingEmojiKeys] = useState<Set<string>>(
+    () => new Set()
+  )
   const [previewPage, setPreviewPage] = useState(1)
   const previewPageSize = 50
   const [albums, setAlbums] = useState<EmojiAlbum[]>([])
@@ -272,6 +290,8 @@ function App() {
   const [flowStage, setFlowStage] = useState<FlowStage>('idle')
   const [flowHint, setFlowHint] = useState('')
   const [flowError, setFlowError] = useState<string | null>(null)
+  const [previewTaskIntent, setPreviewTaskIntent] =
+    useState<PreviewTaskIntent | null>(null)
   const [wechatMustQuit, setWechatMustQuit] = useState(false)
   const [wechatRunningMatches, setWeChatRunningMatches] = useState<
     Array<string>
@@ -291,10 +311,12 @@ function App() {
   const [feedbackContactEmail, setFeedbackContactEmail] = useState('')
   const [feedbackContactEmailError, setFeedbackContactEmailError] = useState('')
   const [confirmClearCacheOpen, setConfirmClearCacheOpen] = useState(false)
+  const [resumeSortConflictOpen, setResumeSortConflictOpen] = useState(false)
 
   const [wechatAppPath, setWechatAppPath] = useState('/Applications/WeChat.app')
   const cancelExportRef = useRef(false)
   const createdSubDirsRef = useRef<Set<number>>(new Set())
+  const copyingEmojiKeysRef = useRef<Set<string>>(new Set())
   const activeFlowWxidRef = useRef<string | null>(null)
   const flowActiveRef = useRef(false)
   const albumRequestGenerationRef = useRef(0)
@@ -314,14 +336,7 @@ function App() {
     return targets.find((t) => valueOfTarget(t) === selectedTargetValue) || null
   }, [selectedTargetValue, targets])
 
-  const lastUpdatedText = useMemo(() => {
-    const ms = selectedTargetMeta?.mtimeMs
-    if (!ms) {
-      return ''
-    }
-    const d = new Date(ms)
-    return d.toLocaleString('zh-CN', { hour12: false })
-  }, [selectedTargetMeta?.mtimeMs])
+  const isPreviewLoading = previewTaskIntent !== null
 
   const selectedTargetName = useMemo(() => {
     if (!selectedTargetMeta) {
@@ -482,7 +497,7 @@ function App() {
       return '没有找到可用的微信账号。请确认微信已登录，然后刷新。'
     }
 
-    return '未检测到微信表情包数据。请确认已安装并登录微信；如果微信已登录但仍为空，请点击“刷新”，并在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
+    return '未检测到微信表情包数据。请确认已安装并登录微信；可在「高级设置」中授权微信数据目录，避免每次启动重复出现系统访问提示。如果微信已登录但仍为空，请点击“刷新”，或在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
   }
 
   async function refreshTargets() {
@@ -543,8 +558,20 @@ function App() {
   }
 
   useEffect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    refreshTargets()
+    // Restore the persisted directory scope before the first WeChat scan.
+    restoreWeChatDataBookmark()
+      .then((status) => {
+        setWechatDataAccess(status)
+        setWechatDataAccessError(null)
+      })
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error)
+        setWechatDataAccessError(detail || '恢复微信数据目录授权失败')
+      })
+      .finally(() => {
+        setWechatDataAccessLoading(false)
+        void refreshTargets()
+      })
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     downloadDir()
       .then(setDownloadDirPath)
@@ -616,6 +643,14 @@ function App() {
   }, [wechatAppPath])
 
   useEffect(() => {
+    localStorage.setItem(EMOJI_SORT_ORDER_STORAGE_KEY, emojiSortOrder)
+  }, [emojiSortOrder])
+
+  useEffect(() => {
+    writeExportSettings(exportSettings)
+  }, [exportSettings])
+
+  useEffect(() => {
     if (!selectedTargetValue) {
       setIncompleteExport(null)
       return
@@ -631,10 +666,18 @@ function App() {
     try {
       const parsed = JSON.parse(incompleteRaw) as Partial<IncompleteExport>
       if (parsed?.dirName && typeof parsed.groupSize === 'number') {
-        setIncompleteExport({
+        const migrated: IncompleteExport = {
           dirName: parsed.dirName,
-          groupSize: parsed.groupSize
-        })
+          groupSize: parsed.groupSize,
+          sortOrder: isEmojiSortOrder(parsed.sortOrder)
+            ? parsed.sortOrder
+            : 'oldest-first'
+        }
+        setIncompleteExport(migrated)
+        localStorage.setItem(
+          `wxemoticon_incomplete_export|${selectedTargetValue}`,
+          JSON.stringify(migrated)
+        )
       } else {
         setIncompleteExport(null)
       }
@@ -644,12 +687,14 @@ function App() {
   }, [selectedTargetValue])
 
   useEffect(() => {
-    const total = showImgList.length
-    const pages = Math.max(1, Math.ceil(total / previewPageSize))
-    if (previewPage > pages) {
-      setPreviewPage(pages)
+    const target = selectedTargetMeta
+    if (!target || !selectedTargetValue) {
+      return
     }
-  }, [previewPage, previewPageSize, showImgList.length])
+    const targetId = valueOfTarget(target)
+    if (lastActivatedTargetIdRef.current === targetId) {
+      return
+    }
 
   useEffect(() => {
     const retryAt = currentStickerHubState.retryAt
@@ -877,10 +922,6 @@ function App() {
         if (await fsExists(p1)) {
           return true
         }
-        const p2 = await join(mirrorDir, 'emoticon_dbkey.txt')
-        if (await fsExists(p2)) {
-          return true
-        }
       }
     } catch {
       // ignore
@@ -897,12 +938,49 @@ function App() {
     }
   }
 
+  async function copyEmojiImage(src: string, itemKey: string) {
+    if (copyingEmojiKeysRef.current.has(itemKey)) {
+      return
+    }
+    copyingEmojiKeysRef.current.add(itemKey)
+    setCopyingEmojiKeys((current) => new Set(current).add(itemKey))
+    try {
+      await copyEmojiFile(src)
+      showToastMessage('已复制原图文件', 'success')
+    } catch {
+      showToastMessage('图片复制失败，请重试', 'warning')
+    } finally {
+      copyingEmojiKeysRef.current.delete(itemKey)
+      setCopyingEmojiKeys((current) => {
+        const next = new Set(current)
+        next.delete(itemKey)
+        return next
+      })
+    }
+  }
+
   async function clearCurrentAccountCache() {
     if (selectedTargetMeta?.kind !== 'v4') {
       showToastMessage('当前账号没有可清除的缓存', 'info')
       return
     }
-    const wxid = selectedTargetMeta.wxidDir
+    const targetId = valueOfTarget(target)
+    clearPreviewCache(targetId)
+
+    if (activeTargetIdRef.current === targetId) {
+      setRawUrls([])
+      setPreviewPage(1)
+      setLastDumpResult(null)
+      setFlowError(null)
+      setFlowStage('idle')
+      setFlowHint('')
+    }
+
+    if (target.kind !== 'v4') {
+      showToastMessage('已清除当前账号缓存', 'success')
+      return
+    }
+    const wxid = target.wxidDir
 
     const appDir = await resolveAppOutDir()
     const mirrorDir = await resolveMirrorOutDir()
@@ -922,10 +1000,7 @@ function App() {
         await join(mirrorDir, `emoticon_dbkey_${wxid}.txt`),
         await join(mirrorDir, `emoticon_dbkey_${wxid}.log`),
         await join(mirrorDir, `emoticon_urls_${wxid}.txt`),
-        await join(mirrorDir, `emoticon_urls_${wxid}.log`),
-        await join(mirrorDir, 'emoticon_dbkey.txt'),
-        await join(mirrorDir, 'emoticon_urls.txt'),
-        await join(mirrorDir, 'emoticon_urls.log')
+        await join(mirrorDir, `emoticon_urls_${wxid}.log`)
       )
     }
 
@@ -937,15 +1012,18 @@ function App() {
       }
     }
 
-    setLastDumpResult(null)
     showToastMessage('已清除当前账号缓存', 'success')
   }
 
-  async function loadPreview() {
-    let target = selectedTargetMeta
+  async function loadPreview(options: LoadPreviewOptions = {}) {
+    let target = options.target || selectedTargetMeta
     if (!target && targets.length === 1) {
       target = targets[0]
-      setSelectedTargetValue(valueOfTarget(targets[0]))
+      const targetId = valueOfTarget(target)
+      setSelectedTargetValue(targetId)
+      activeTargetIdRef.current = targetId
+      lastActivatedTargetIdRef.current = targetId
+      activationGenerationRef.current += 1
     }
 
     if (!target) {
@@ -970,6 +1048,22 @@ function App() {
       return await message(tip, { title: '提示', type: 'info' })
     }
 
+    const targetId = valueOfTarget(target)
+    const generation =
+      options.activationGeneration ?? activationGenerationRef.current
+    const belongsToActiveTarget = () =>
+      activeTargetIdRef.current === targetId &&
+      activationGenerationRef.current === generation
+
+    if (activePreviewTaskRef.current) {
+      return
+    }
+
+    const hadPreview = options.cachedPreview ?? rawUrls.length > 0
+    const intent =
+      options.intent || (hadPreview ? ('refresh' as const) : ('initial' as const))
+    activePreviewTaskRef.current = { targetId, generation }
+    setPreviewTaskIntent(intent)
     setFlowError(null)
     setFlowHint('')
     setWechatMustQuit(false)
@@ -982,11 +1076,14 @@ function App() {
     setPreviewPage(1)
     setLastDumpResult(null)
 
-    if (target.kind === 'legacy') {
-      setFlowStage('offlineParsing')
-      setFlowHint('正在解析旧版微信数据…')
-      try {
+    try {
+      if (target.kind === 'legacy') {
+        setFlowStage('offlineParsing')
+        setFlowHint('正在解析旧版微信数据…')
         const urls = await extractFavUrls(target.favArchivePath)
+        if (!belongsToActiveTarget()) {
+          return
+        }
         if (!urls.length) {
           throw new Error('没有解析到任何表情包链接')
         }
@@ -1003,18 +1100,19 @@ function App() {
         setFlowStage('error')
         setFlowHint('')
       }
-      return
-    }
 
-    // v4 flow:
-    // - If we already have a cached db key, we can try offline parsing without forcing the user to quit WeChat.
-    // - Only require quitting WeChat when we need to dump a new key.
-    const hasKey = await hasCachedDbKey(target.wxidDir)
-    if (!hasKey) {
-      setFlowStage('checkingWechat')
-      setFlowHint('正在检查微信是否已退出…')
-      try {
+      // If a key already exists, refresh offline without forcing WeChat to quit.
+      const hasKey = await hasCachedDbKey(target.wxidDir)
+      if (!belongsToActiveTarget()) {
+        return
+      }
+      if (!hasKey) {
+        setFlowStage('checkingWechat')
+        setFlowHint('正在检查微信是否已退出…')
         const check = await checkWeChatRunning(wechatAppPath)
+        if (!belongsToActiveTarget()) {
+          return
+        }
         if (check.running) {
           setWechatMustQuit(true)
           setWeChatRunningMatches(check.matches || [])
@@ -1034,11 +1132,12 @@ function App() {
         showToastMessage(friendly, 'error')
         return
       }
-    }
 
-    // Ensure WeChat.app exists (otherwise the injector cannot run).
-    try {
+      // The existing v4 pipeline uses this path when it needs to obtain a key.
       const ok = await fsExists(wechatAppPath)
+      if (!belongsToActiveTarget()) {
+        return
+      }
       if (!ok) {
         const tip = '未找到微信应用。请在“设置”中重新选择安装位置。'
         setFlowError(tip)
@@ -1047,9 +1146,6 @@ function App() {
         showToastMessage(tip, 'error')
         return
       }
-    } catch {
-      // ignore
-    }
 
     setFlowStage(hasKey ? 'offlineParsing' : 'preparingWeChatCopy')
     setFlowHint(
@@ -1090,6 +1186,9 @@ function App() {
       setFlowHint('')
       flowActiveRef.current = false
     } catch (err) {
+      if (!belongsToActiveTarget()) {
+        return
+      }
       const msg = err instanceof Error ? err.message : String(err)
       flowActiveRef.current = false
 
@@ -1120,10 +1219,29 @@ function App() {
           ? '未找到微信应用。请在“设置”中重新选择安装位置。'
           : '读取表情失败。请重试；如果问题持续，请在“设置”中打开诊断信息。'
 
-      setFlowError(friendly)
-      setFlowStage('error')
+      if (hadPreview) {
+        setFlowError(null)
+        setFlowStage('ready')
+        showToastMessage(
+          intent === 'auto-refresh'
+            ? '已显示缓存，自动刷新失败，可手动重试'
+            : '重新获取失败，已保留缓存预览',
+          'warning'
+        )
+      } else {
+        setFlowError(friendly)
+        setFlowStage('error')
+        showToastMessage(friendly || '自动导出失败', 'error')
+      }
       setFlowHint('')
-      showToastMessage(friendly || '自动导出失败', 'error')
+    } finally {
+      const task = activePreviewTaskRef.current
+      if (task?.targetId === targetId && task.generation === generation) {
+        activePreviewTaskRef.current = null
+        if (belongsToActiveTarget()) {
+          setPreviewTaskIntent(null)
+        }
+      }
     }
   }
 
@@ -1294,6 +1412,7 @@ function App() {
     dirName: string
     groupSize: number
     resumeExisting: boolean
+    sortOrder: EmojiSortOrder
   }) {
     if (!showImgList.length) {
       return await message('请先读取表情。', {
@@ -1326,12 +1445,14 @@ function App() {
           `wxemoticon_incomplete_export|${selectedTargetValue}`,
           JSON.stringify({
             dirName: options.dirName,
-            groupSize: options.groupSize
+            groupSize: options.groupSize,
+            sortOrder: options.sortOrder
           })
         )
         setIncompleteExport({
           dirName: options.dirName,
-          groupSize: options.groupSize
+          groupSize: options.groupSize,
+          sortOrder: options.sortOrder
         })
       }
 
@@ -1387,35 +1508,33 @@ function App() {
           }
         }
 
-        const result = await fetchBinaryWithFallback(src)
+        let result
+        try {
+          result = await loadEmojiBinary(src)
+        } catch {
+          failed += 1
+          setExportFailed(failed)
+          setExportProgress(i + 1)
+          continue
+        }
         if (cancelExportRef.current) {
           break
         }
 
-        if (result.ok) {
-          const ext =
-            extFromBytes(result.buffer) ||
-            extFromContentType(result.contentType) ||
-            extFromUrl(result.usedUrl) ||
-            'gif'
-          try {
-            await exportOneEmoji({
-              customEmotionsDirName: options.dirName,
-              groupSize: options.groupSize,
-              createdSubDirs: createdSubDirsRef.current,
-              index: i,
-              usedUrl: result.usedUrl,
-              fileKey,
-              buffer: result.buffer,
-              ext
-            })
-            ok += 1
-            setExportOk(ok)
-          } catch {
-            failed += 1
-            setExportFailed(failed)
-          }
-        } else {
+        try {
+          await exportOneEmoji({
+            customEmotionsDirName: options.dirName,
+            groupSize: options.groupSize,
+            createdSubDirs: createdSubDirsRef.current,
+            index: i,
+            usedUrl: result.usedUrl,
+            fileKey,
+            buffer: result.buffer,
+            ext: result.ext
+          })
+          ok += 1
+          setExportOk(ok)
+        } catch {
           failed += 1
           setExportFailed(failed)
         }
@@ -1489,7 +1608,8 @@ function App() {
     await runExport({
       dirName,
       groupSize,
-      resumeExisting: exportResume
+      resumeExisting: exportResume,
+      sortOrder: emojiSortOrder
     })
   }
 
@@ -1497,10 +1617,22 @@ function App() {
     if (!incompleteExport) {
       return
     }
+    if (incompleteExport.sortOrder !== emojiSortOrder) {
+      setResumeSortConflictOpen(true)
+      return
+    }
+    await continueExportWithRecordedOrder()
+  }
+
+  async function continueExportWithRecordedOrder() {
+    if (!incompleteExport) {
+      return
+    }
     await runExport({
       dirName: incompleteExport.dirName,
       groupSize: incompleteExport.groupSize,
-      resumeExisting: true
+      resumeExisting: true,
+      sortOrder: incompleteExport.sortOrder
     })
   }
 

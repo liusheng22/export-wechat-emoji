@@ -19,6 +19,11 @@ tools/wechat-key-dumper/*.dylib
 cli/target
 scripts/*bak*
 
+# WeChat account data and export artifacts
+emoticon_dbkey*.txt
+emoticon_dbkey*.wxid
+emoticon_urls*.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

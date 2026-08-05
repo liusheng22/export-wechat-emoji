@@ -96,6 +96,19 @@ jobs:
           releaseDraft: false
           prerelease: false
 
+      - name: add macOS repair helper to DMG
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="src-tauri/target/${{ matrix.tauri_target }}/release/bundle"
+          DMG_PATH="$(find "${BUNDLE_DIR}/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+
+          if [[ -z "${DMG_PATH}" ]]; then
+            echo "Tauri DMG not found in ${BUNDLE_DIR}/dmg" >&2
+            exit 1
+          fi
+
+          bash packaging/macos/add-fix-script-to-dmg.sh "${DMG_PATH}"
+
       - name: upload app assets with clear names (${{ matrix.app_arch }})
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

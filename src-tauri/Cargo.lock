@@ -4794,6 +4794,7 @@ dependencies = [
  "base64 0.22.1",
  "cbc",
  "cipher",
+ "cocoa",
  "hex",
  "hmac",
  "md5",

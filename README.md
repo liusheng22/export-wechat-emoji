@@ -1,10 +1,10 @@
-# 导出微信表情包（macOS）
+# 导出微信表情包（macOS / Linux）
 
 [![release](https://github.com/liusheng22/export-wechat-emoji/actions/workflows/release.yml/badge.svg)](https://github.com/liusheng22/export-wechat-emoji/actions/workflows/release.yml)
 
 > 一键导出微信收藏表情包，方便批量导入飞书、企微、钉钉等平台。
 
-> 仅支持 macOS。
+> GUI 目前支持 macOS；`wxemoticon` 命令行工具支持 macOS 和 Linux。
 
 ## 功能概览
 
@@ -13,6 +13,51 @@
 - 导出支持每 50 张分组或不分组
 - 支持断点续跑（跳过已存在文件）与导出统计
 - 提供可选 CLI：`wxemoticon`
+
+## Linux CLI（Ubuntu/Debian x86_64）
+
+已适配腾讯官方 Linux 微信 4.x（默认程序 `/opt/wechat/wechat`）。Linux 版当前仅提供命令行工具，不包含 GUI 或 `.deb` 安装包。
+
+### 从源码构建
+
+需要 Rust stable、`build-essential` 和 `pkg-config`：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config
+git clone https://github.com/liusheng22/export-wechat-emoji.git
+cd export-wechat-emoji
+cargo build --manifest-path cli/Cargo.toml --release
+install -Dm755 cli/target/release/wxemoticon ~/.local/bin/wxemoticon
+```
+
+确保 `~/.local/bin` 已加入 `PATH`，然后执行：
+
+```bash
+# 查看账号（优先读取 XDG 文档目录，并兼容 ~/Documents 和 ~/文档）
+wxemoticon urls --list-accounts
+
+# 直接导出；需要重新抓 key 时会提示先退出微信
+wxemoticon export
+```
+
+非默认安装或数据位置可显式指定：
+
+```bash
+wxemoticon \
+  --wechat-bin /opt/wechat/wechat \
+  --wechat-data-dir "$HOME/文档/xwechat_files" \
+  export
+```
+
+Linux 自动抓 key 会启动一次官方微信，并仅读取本次启动的微信进程内存；找到与目标 `emoticon.db` 首页 HMAC 匹配的 key 后立即停止该进程。若微信本身无法启动，或系统策略禁止读取 `/proc/<pid>/mem`，仍可先提供已有 key 生成 URL，再从 URL 文件导出：
+
+```bash
+wxemoticon urls --key-file /path/to/emoticon_dbkey.txt --out /tmp/emoticon_urls.txt
+wxemoticon export --urls-file /tmp/emoticon_urls.txt
+```
+
+缓存与日志默认写入 `~/.local/share/wxemoticon`，图片默认导出到 `~/Downloads`。
 
 ## 下载与安装（GUI）
 
@@ -43,7 +88,7 @@
 
 ## CLI（命令行方式）
 
-如果你更喜欢命令行，可使用 `wxemoticon`（macOS）。
+如果你更喜欢命令行，可使用 `wxemoticon`（macOS / Linux）。
 
 安装方式 A：安装脚本（默认，零配置）
 
@@ -124,17 +169,17 @@ wxemoticon export
 ### 指定 `wxid` 的完整示例
 
 ```bash
-# 1) 先列出账号，拿到目标 wxid（例如 wxid_p5stvq48u5mv12_57c3）
+# 1) 先列出账号，拿到目标 wxid（例如 wxid_xxx）
 wxemoticon urls --list-accounts
 
 # 2) 指定 wxid 抓取/刷新 db key
-wxemoticon key --wxid "wxid_p5stvq48u5mv12_57c3"
+wxemoticon key --wxid "wxid_xxx"
 
 # 3) 指定 wxid 导出 URL 列表（可选）
-wxemoticon urls --wxid "wxid_p5stvq48u5mv12_57c3"
+wxemoticon urls --wxid "wxid_xxx"
 
 # 4) 指定 wxid 直接导出表情包图片
-wxemoticon export --wxid "wxid_p5stvq48u5mv12_57c3"
+wxemoticon export --wxid "wxid_xxx"
 ```
 
 如果你想做脚本化（不走交互），可以加 `--no-interactive` 与 `--json`：

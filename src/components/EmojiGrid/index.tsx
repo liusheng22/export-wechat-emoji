@@ -2,7 +2,6 @@ import type { IMaybeUrl } from '../../types'
 import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined'
 import ImageNotSupportedOutlinedIcon from '@mui/icons-material/ImageNotSupportedOutlined'
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined'
-import ZoomInOutlinedIcon from '@mui/icons-material/ZoomInOutlined'
 import { Box, CircularProgress, IconButton, Tooltip } from '@mui/material'
 import React, { useEffect, useRef, useState } from 'react'
 import { PhotoProvider, PhotoView } from 'react-photo-view'
@@ -38,6 +37,10 @@ function previewIdentity(item: IMaybeUrl): string {
   )
 }
 
+function copySourceForItem(item: IMaybeUrl): string {
+  return item.downloadUrl || item.localSourcePath || item._text
+}
+
 function findPreviewIndex(
   items: IMaybeUrl[],
   target: IMaybeUrl,
@@ -60,7 +63,6 @@ interface EmojiGridProps {
   showImgList: IMaybeUrl[]
   previewPage: number
   previewPageSize: number
-  copyToClipboard: (value: string, okMessage: string) => void
   copyEmojiImage?: (src: string, itemKey: string) => void
   copyingEmojiKeys?: Set<string>
   openSystem: (target: string) => void
@@ -74,7 +76,6 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
   showImgList,
   previewPage,
   previewPageSize,
-  copyToClipboard,
   copyEmojiImage,
   copyingEmojiKeys = new Set(),
   openSystem,
@@ -335,7 +336,49 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
 
   return (
     <Box sx={{ pb: 3 }}>
-      <PhotoProvider>
+      <PhotoProvider
+        toolbarRender={({ index }) => {
+          const item = currentItems[index]
+          if (!item || !copyEmojiImage) {
+            return null
+          }
+
+          const itemKey = `${item._text}|${pageStart + index + 1}`
+          const isCopying = copyingEmojiKeys.has(itemKey)
+          return (
+            <Tooltip title={isCopying ? '正在复制图片…' : '复制图片'}>
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label="复制图片"
+                  disabled={isCopying}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    copyEmojiImage(copySourceForItem(item), itemKey)
+                  }}
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    color: '#FFFFFF',
+                    bgcolor: 'rgba(24, 28, 31, 0.76)',
+                    '&:hover': { bgcolor: 'rgba(24, 28, 31, 0.92)' }
+                  }}
+                >
+                  {isCopying ? (
+                    <CircularProgress
+                      size={16}
+                      thickness={3}
+                      sx={{ color: 'inherit' }}
+                    />
+                  ) : (
+                    <ContentCopyOutlinedIcon sx={{ fontSize: 16 }} />
+                  )}
+                </IconButton>
+              </span>
+            </Tooltip>
+          )
+        }}
+      >
         <Box
           className="img-preview"
           sx={{
@@ -414,14 +457,7 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                       <Box
                         component="button"
                         type="button"
-                        aria-label={`下载并复制表情 ${absoluteIndex}`}
-                        disabled={!copyEmojiImage || isCopying}
-                        onClick={() =>
-                          copyEmojiImage?.(
-                            item.downloadUrl || item.localSourcePath || item._text,
-                            itemKey
-                          )
-                        }
+                        aria-label={`查看表情大图 ${absoluteIndex}`}
                         sx={{
                           width: '100%',
                           height: '100%',
@@ -430,8 +466,7 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                           p: 1.25,
                           border: 0,
                           bgcolor: 'transparent',
-                          cursor: copyEmojiImage ? 'pointer' : 'zoom-in',
-                          '&:disabled': { cursor: 'wait' }
+                          cursor: 'zoom-in'
                         }}
                       >
                         <img
@@ -445,14 +480,6 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                             objectFit: 'contain'
                           }}
                         />
-                        {isCopying && (
-                          <CircularProgress
-                            size={22}
-                            thickness={3.5}
-                            sx={{ position: 'absolute' }}
-                            aria-label="正在复制图片"
-                          />
-                        )}
                       </Box>
                     </PhotoView>
                   )}
@@ -469,43 +496,27 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                       transition: 'opacity 120ms ease'
                     }}
                   >
-                    <PhotoView src={previewSrc}>
-                      <IconButton
-                        size="small"
-                        aria-label="查看大图"
-                        onClick={(event) => event.stopPropagation()}
-                        sx={{
-                          width: 28,
-                          height: 28,
-                          color: '#FFFFFF',
-                          bgcolor: 'rgba(24, 28, 31, 0.76)',
-                          '&:hover': { bgcolor: 'rgba(24, 28, 31, 0.92)' }
-                        }}
-                      >
-                        <ZoomInOutlinedIcon sx={{ fontSize: 16 }} />
-                      </IconButton>
-                    </PhotoView>
-                    <Tooltip title="复制图片地址">
-                      <IconButton
-                        size="small"
-                        aria-label="复制图片地址"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          copyToClipboard(
-                            item.downloadUrl || item.localSourcePath || item._text,
-                            '图片地址已复制'
-                          )
-                        }}
-                        sx={{
-                          width: 28,
-                          height: 28,
-                          color: '#FFFFFF',
-                          bgcolor: 'rgba(24, 28, 31, 0.76)',
-                          '&:hover': { bgcolor: 'rgba(24, 28, 31, 0.92)' }
-                        }}
-                      >
-                        <ContentCopyOutlinedIcon sx={{ fontSize: 15 }} />
-                      </IconButton>
+                    <Tooltip title={isCopying ? '正在复制图片…' : '复制图片'}>
+                      <span>
+                        <IconButton
+                          size="small"
+                          aria-label="复制图片"
+                          disabled={!copyEmojiImage || isCopying}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            copyEmojiImage?.(copySourceForItem(item), itemKey)
+                          }}
+                          sx={{
+                            width: 28,
+                            height: 28,
+                            color: '#FFFFFF',
+                            bgcolor: 'rgba(24, 28, 31, 0.76)',
+                            '&:hover': { bgcolor: 'rgba(24, 28, 31, 0.92)' }
+                          }}
+                        >
+                          <ContentCopyOutlinedIcon sx={{ fontSize: 15 }} />
+                        </IconButton>
+                      </span>
                     </Tooltip>
                     <Tooltip title="打开图片链接">
                       <IconButton

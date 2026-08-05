@@ -7,12 +7,13 @@ import type {
 import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined'
 import DownloadIcon from '@mui/icons-material/Download'
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
+import HelpOutlineOutlinedIcon from '@mui/icons-material/HelpOutlineOutlined'
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined'
+import SettingsIcon from '@mui/icons-material/Settings'
 import {
   Alert,
   Box,
   Button,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -25,6 +26,7 @@ import {
   Link,
   LinearProgress,
   MenuItem,
+  Menu,
   Pagination,
   Paper,
   Radio,
@@ -33,8 +35,6 @@ import {
   Snackbar,
   Skeleton,
   Stack,
-  Tab,
-  Tabs,
   Switch,
   TextField,
   Tooltip,
@@ -76,17 +76,9 @@ import {
 import { loadEmojiBinary } from './services/emoji-binary-cache'
 import { copyEmojiFile } from './services/emoji-file-cache'
 import {
-  clearPreviewCache,
-  readPreviewCache,
-  writePreviewCache
-} from './services/preview-cache'
-import { readExportSettings, writeExportSettings } from './services/export-settings'
-import {
-  buildGitHubMissingAlbumIssueUrl,
-  buildMissingAlbumFeedbackPayload,
-  isValidFeedbackContactEmail,
-  submitMissingAlbumEmailFeedback
-} from './services/feedback'
+  readExportSettings,
+  writeExportSettings
+} from './services/export-settings'
 import {
   buildUniqueFileKeys,
   ensureExportRootDir,
@@ -97,6 +89,17 @@ import {
   writeUrlsFile,
   writeUsageReadme
 } from './services/exporter'
+import {
+  buildGitHubMissingAlbumIssueUrl,
+  buildMissingAlbumFeedbackPayload,
+  isValidFeedbackContactEmail,
+  submitMissingAlbumEmailFeedback
+} from './services/feedback'
+import {
+  clearPreviewCache,
+  readPreviewCache,
+  writePreviewCache
+} from './services/preview-cache'
 import {
   buildStickerHubAlbumItems,
   readStickerHubAlbumCache,
@@ -114,7 +117,7 @@ import {
   displayNameOfTarget,
   encodeEmojiTarget,
   findEmojiTargetsWithMeta,
-  mergeCurrentAccountProfileIntoTargets,
+  mergeCurrentAccountProfileIntoTargets
 } from './services/wechat'
 import {
   restoreWeChatDataBookmark,
@@ -151,8 +154,6 @@ type ExportResult = {
   canceled: boolean
   groupSize: number
 }
-
-type AppTab = 'preview' | 'export' | 'advanced'
 
 type EmojiSortOrder = 'newest-first' | 'oldest-first'
 
@@ -276,14 +277,14 @@ function App() {
   )
   const [previewPage, setPreviewPage] = useState(1)
   const previewPageSize = 50
-  const [activeTab, setActiveTab] = useState<AppTab>('preview')
   const [emojiSortOrder, setEmojiSortOrder] = useState<EmojiSortOrder>(() => {
     const saved = localStorage.getItem(EMOJI_SORT_ORDER_STORAGE_KEY)
     return isEmojiSortOrder(saved) ? saved : 'newest-first'
   })
   const [albums, setAlbums] = useState<EmojiAlbum[]>([])
   const [catalogFavorites, setCatalogFavorites] = useState<Array<string>>([])
-  const [catalogMode, setCatalogMode] = useState<EmoticonCatalogMode>('unavailable')
+  const [catalogMode, setCatalogMode] =
+    useState<EmoticonCatalogMode>('unavailable')
   const [catalogWarnings, setCatalogWarnings] = useState<string[]>([])
   const [stickerHubAlbumStates, setStickerHubAlbumStates] = useState<
     Record<string, StickerHubAlbumViewState>
@@ -310,7 +311,9 @@ function App() {
   const [exportCustomGroupSize, setExportCustomGroupSize] = useState(
     persistedExportSettings.customGroupSize
   )
-  const [exportResume, setExportResume] = useState(persistedExportSettings.resume)
+  const [exportResume, setExportResume] = useState(
+    persistedExportSettings.resume
+  )
   const [exportAutoOpen, setExportAutoOpen] = useState(
     persistedExportSettings.autoOpen
   )
@@ -372,6 +375,10 @@ function App() {
     targetId: string
     generation: number
   } | null>(null)
+  const [settingsAnchorEl, setSettingsAnchorEl] = useState<null | HTMLElement>(
+    null
+  )
+  const openSettings = Boolean(settingsAnchorEl)
 
   const valueOfTarget = (t: EmojiTargetMeta) => encodeEmojiTarget(t)
 
@@ -408,11 +415,16 @@ function App() {
   }, [albums, currentView])
 
   const currentStickerHubState = currentAlbum?.packageId
-    ? stickerHubAlbumStates[currentAlbum.packageId] || { status: 'idle' as const }
+    ? stickerHubAlbumStates[currentAlbum.packageId] || {
+        status: 'idle' as const
+      }
     : { status: 'idle' as const }
 
   const currentRetrySeconds = currentStickerHubState.retryAt
-    ? Math.max(0, Math.ceil((currentStickerHubState.retryAt - rateLimitNow) / 1000))
+    ? Math.max(
+        0,
+        Math.ceil((currentStickerHubState.retryAt - rateLimitNow) / 1000)
+      )
     : 0
 
   const currentViewTitle = useMemo(() => {
@@ -499,7 +511,7 @@ function App() {
     if (catalogMode === 'partial') {
       return {
         severity: 'warning' as const,
-        message: '部分专辑暂时无法完整显示。'
+        message: '部分专辑未完整显示'
       }
     }
 
@@ -517,12 +529,7 @@ function App() {
       severity: 'info' as const,
       message: '暂时无法读取表情专辑。'
     }
-  }, [
-    catalogMode,
-    catalogWarnings,
-    flowStage,
-    selectedTargetMeta?.kind
-  ])
+  }, [catalogMode, catalogWarnings, flowStage, selectedTargetMeta?.kind])
 
   function buildWeChatAccessHint(
     diag: WeChatEnvironmentDiag | null
@@ -551,7 +558,7 @@ function App() {
       return '没有找到可用的微信账号。请确认微信已登录，然后刷新。'
     }
 
-    return '未检测到微信表情包数据。请确认已安装并登录微信；可在「高级设置」中授权微信数据目录，避免每次启动重复出现系统访问提示。如果微信已登录但仍为空，请点击“刷新”，或在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
+    return '未检测到微信表情包数据。请确认已安装并登录微信；可在「设置」中授权微信数据目录，避免每次启动重复出现系统访问提示。如果微信已登录但仍为空，请点击“刷新”，或在系统设置中为本应用开启“完全磁盘访问权限”后重试。'
   }
 
   async function refreshTargets() {
@@ -826,7 +833,9 @@ function App() {
     const cache = readPreviewCache(targetId)
     if (cache) {
       setRawUrls(cache.urls)
-      setRestoredCacheNotice(`已恢复该账号的本地 URL 缓存（${cache.urls.length} 条）`)
+      setRestoredCacheNotice(
+        `已恢复该账号的本地 URL 缓存（${cache.urls.length} 条）`
+      )
       if (target.kind === 'v4' && cache.artifacts?.wxid === target.wxidDir) {
         setLastDumpResult(cache.artifacts)
       }
@@ -906,7 +915,6 @@ function App() {
 
   function handleViewChange(view: string) {
     setCurrentView(view)
-    setActiveTab(view === 'settings' ? 'advanced' : 'preview')
   }
 
   async function chooseWeChatApp() {
@@ -1120,7 +1128,7 @@ function App() {
     setCopyingEmojiKeys((current) => new Set(current).add(itemKey))
     try {
       await copyEmojiFile(src)
-      showToastMessage('已复制原图文件', 'success')
+      showToastMessage('已复制图片，可直接粘贴到聊天窗口', 'success')
     } catch {
       showToastMessage('图片复制失败，请重试', 'warning')
     } finally {
@@ -1236,7 +1244,8 @@ function App() {
 
     const hadPreview = options.cachedPreview ?? rawUrls.length > 0
     const intent =
-      options.intent || (hadPreview ? ('refresh' as const) : ('initial' as const))
+      options.intent ||
+      (hadPreview ? ('refresh' as const) : ('initial' as const))
     activePreviewTaskRef.current = { targetId, generation }
     setPreviewTaskIntent(intent)
     setFlowError(null)
@@ -1272,7 +1281,9 @@ function App() {
         setCatalogMode('favorites_only')
         setCurrentView('favorites')
         writePreviewCache(targetId, urls)
-        setRestoredCacheNotice(`已恢复该账号的本地 URL 缓存（${urls.length} 条）`)
+        setRestoredCacheNotice(
+          `已恢复该账号的本地 URL 缓存（${urls.length} 条）`
+        )
         setRawUrls(urls)
         setShowImgList(
           buildEmojiItems(orderUrls(urls, emojiSortOrder), {
@@ -1319,25 +1330,25 @@ function App() {
         return
       }
 
-    setFlowStage(hasKey ? 'offlineParsing' : 'preparingWeChatCopy')
-    setFlowHint(
-      hasKey
-        ? '正在读取本地表情数据…'
-        : '正在准备微信数据…如微信自动打开，请登录并打开一次表情面板。'
-    )
-    flowActiveRef.current = true
-    activeFlowWxidRef.current = target.wxidDir
-    const result = await autoDumpEmoticonUrlsV4(
-      target.wxidDir,
-      wechatAppPath,
-      intent !== 'auto-refresh'
-    )
-    if (!belongsToActiveTarget()) {
-      return
-    }
-    setLastDumpResult(result)
-    const urls = result.urls || []
-    const catalog = await buildEmoticonCatalogV4(target.wxidDir, result.dbKey)
+      setFlowStage(hasKey ? 'offlineParsing' : 'preparingWeChatCopy')
+      setFlowHint(
+        hasKey
+          ? '正在读取本地表情数据…'
+          : '正在准备微信数据…如微信自动打开，请登录并打开一次表情面板。'
+      )
+      flowActiveRef.current = true
+      activeFlowWxidRef.current = target.wxidDir
+      const result = await autoDumpEmoticonUrlsV4(
+        target.wxidDir,
+        wechatAppPath,
+        intent !== 'auto-refresh'
+      )
+      if (!belongsToActiveTarget()) {
+        return
+      }
+      setLastDumpResult(result)
+      const urls = result.urls || []
+      const catalog = await buildEmoticonCatalogV4(target.wxidDir, result.dbKey)
       const favorites = catalog.favorites?.length ? catalog.favorites : urls
       const nextAlbums = catalog.albums || []
       const nextMode = catalog.mode || 'unavailable'
@@ -1366,7 +1377,9 @@ function App() {
       setPreviewPage(1)
       if (urls.length) {
         writePreviewCache(targetId, urls, result)
-        setRestoredCacheNotice(`已恢复该账号的本地 URL 缓存（${urls.length} 条）`)
+        setRestoredCacheNotice(
+          `已恢复该账号的本地 URL 缓存（${urls.length} 条）`
+        )
         setRawUrls(urls)
       }
       setFlowStage('ready')
@@ -1545,9 +1558,9 @@ function App() {
         }
         const hasRemoteItems = result.payload
           ? applyPayload(
-            result.payload,
-            result.status === 'ready' ? 'ready' : 'stale'
-          )
+              result.payload,
+              result.status === 'ready' ? 'ready' : 'stale'
+            )
           : false
         if (result.status === 'rate_limited') {
           setAlbumStatus({
@@ -1564,7 +1577,9 @@ function App() {
           setAlbumStatus({ status: result.status })
         }
       } catch {
-        setAlbumStatus({ status: cacheStatus === 'stale' ? 'error' : 'offline' })
+        setAlbumStatus({
+          status: cacheStatus === 'stale' ? 'error' : 'offline'
+        })
       }
     }
 
@@ -1652,10 +1667,7 @@ function App() {
         options.dirName,
         items.map(
           (item) =>
-            item.localSourcePath ||
-            item.downloadUrl ||
-            item.src ||
-            item._text
+            item.localSourcePath || item.downloadUrl || item.src || item._text
         )
       )
       if (
@@ -1861,11 +1873,11 @@ function App() {
         catalogMode={catalogMode}
       />
 
-      <Box component="main" className="main-content" sx={{ position: 'relative' }}>
-        <Paper
-          variant="outlined"
-          sx={{ height: '100%', borderRadius: 0, overflow: 'hidden' }}
-        >
+      <Box
+        component="main"
+        className="main-content"
+        sx={{ position: 'relative' }}
+      >
         <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
           <Box
             component="header"
@@ -1900,9 +1912,8 @@ function App() {
                   {currentViewSubtitle}
                 </Typography>
               </Box>
-              {activeTab === 'preview' &&
-                (currentView === 'favorites' ||
-                  currentView.startsWith('album|')) && (
+              {(currentView === 'favorites' ||
+                currentView.startsWith('album|')) && (
                 <Stack
                   direction="row"
                   spacing={0.75}
@@ -1912,7 +1923,6 @@ function App() {
                   {!isExporting && (
                     <>
                       <Button
-                        aria-label="获取并预览"
                         variant={showImgList.length ? 'outlined' : 'contained'}
                         onClick={() => void loadPreview()}
                         disabled={
@@ -1922,29 +1932,27 @@ function App() {
                         }
                         size="small"
                       >
-                        {isPreviewLoading ? '读取中…' : '刷新预览'}
+                        {isPreviewLoading
+                          ? previewTaskIntent === 'initial'
+                            ? '正在获取…'
+                            : '正在重新获取…'
+                          : showImgList.length
+                            ? '重新读取'
+                            : '一键获取并预览'}
                       </Button>
 
                       {showImgList.length > 0 && (
-                        <>
-                          <Button
-                            variant="contained"
-                            startIcon={<DownloadIcon sx={{ fontSize: 17 }} />}
-                            onClick={startNewExport}
+                        <Tooltip title="导出设置">
+                          <IconButton
+                            aria-label="导出设置"
+                            onClick={(event) =>
+                              setSettingsAnchorEl(event.currentTarget)
+                            }
                             size="small"
                           >
-                            导出全部
-                          </Button>
-                          {incompleteExport && (
-                            <Button
-                              variant="outlined"
-                              onClick={continueLastExport}
-                              size="small"
-                            >
-                              继续上次
-                            </Button>
-                          )}
-                        </>
+                            <SettingsIcon sx={{ fontSize: 18 }} />
+                          </IconButton>
+                        </Tooltip>
                       )}
                     </>
                   )}
@@ -1965,7 +1973,9 @@ function App() {
             </Stack>
           </Box>
 
-          <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 3, py: 2.5 }}>
+          <Box
+            sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 3, py: 2.5 }}
+          >
             {targetsError && (
               <Alert severity="error" sx={{ mb: 2 }}>
                 {targetsError}
@@ -1985,13 +1995,14 @@ function App() {
                   <Button
                     color="inherit"
                     size="small"
-                    onClick={() => setActiveTab('advanced')}
+                    onClick={() => setCurrentView('settings')}
                   >
                     去授权
                   </Button>
                 }
               >
-                macOS 首次读取微信数据可能需要授权。授权一次后，应用会记住访问范围，减少重复提示。
+                macOS
+                首次读取微信数据可能需要授权。授权一次后，应用会记住访问范围，减少重复提示。
               </Alert>
             )}
 
@@ -2006,95 +2017,8 @@ function App() {
               isV4={selectedTargetMeta?.kind === 'v4'}
             />
 
-            <Tabs
-              value={activeTab}
-              onChange={(_event, value: AppTab) => setActiveTab(value)}
-              aria-label="功能导航"
-              variant="fullWidth"
-              sx={{ mb: 2 }}
-            >
-              <Tab
-                value="preview"
-                label={
-                  <Stack direction="row" spacing={0.75} alignItems="center">
-                    <span>表情预览</span>
-                    {isPreviewLoading && <CircularProgress size={14} />}
-                  </Stack>
-                }
-              />
-              <Tab
-                value="export"
-                label={
-                  <Stack direction="row" spacing={0.75} alignItems="center">
-                    <span>导出</span>
-                    {isExporting && <CircularProgress size={14} />}
-                  </Stack>
-                }
-              />
-              <Tab value="advanced" label="高级设置" />
-            </Tabs>
-
-            {activeTab === 'preview' && catalogNotice && currentView === 'favorites' && (
-                <Alert
-                  severity={catalogNotice.severity}
-                  variant="outlined"
-                  sx={{ mb: 2 }}
-                >
-                  {catalogNotice.message}
-                </Alert>
-              )}
-
-            {activeTab === 'preview' && (
-              <>
-                <Stack spacing={1.25} sx={{ mb: 2 }}>
-                  {flowError && (
-                    <Alert
-                      severity="error"
-                      action={
-                        selectedTargetMeta?.kind === 'v4' ? (
-                          <Button color="inherit" size="small" onClick={openLogDir}>
-                            打开日志目录
-                          </Button>
-                        ) : undefined
-                      }
-                    >
-                      {flowError}
-                    </Alert>
-                  )}
-                  <Stack direction="row" spacing={1.25} flexWrap="wrap">
-                    <Button
-                      size="large"
-                      variant="contained"
-                      onClick={() => void loadPreview()}
-                      disabled={
-                        isExporting ||
-                        isPreviewLoading ||
-                        targetsLoading ||
-                        !selectedTargetValue
-                      }
-                    >
-                      {previewTaskIntent
-                        ? previewTaskIntent === 'initial'
-                          ? '正在获取…'
-                          : '正在重新获取…'
-                        : '一键获取并预览'}
-                    </Button>
-                  </Stack>
-                  {previewTaskIntent === 'initial' &&
-                    (flowStage === 'checkingWechat' ||
-                      flowStage === 'preparingWeChatCopy' ||
-                      flowStage === 'waitingForKey' ||
-                      flowStage === 'offlineParsing') && (
-                    <Box>
-                      <Typography variant="body2" sx={{ mb: 0.75 }}>
-                        {flowHint || '正在处理，请稍候…'}
-                      </Typography>
-                      <LinearProgress />
-                    </Box>
-                  )}
-                </Stack>
-
-                {currentView === 'favorites' || currentView.startsWith('album|') ? (
+            {(currentView === 'favorites' ||
+              currentView.startsWith('album|')) && (
               <>
                 {currentView.startsWith('album|') &&
                   currentStickerHubState.status === 'loading' && (
@@ -2157,23 +2081,161 @@ function App() {
                 {showImgList.length > 0 && (
                   <Stack
                     direction="row"
-                    justifyContent="flex-end"
                     alignItems="center"
-                    spacing={1}
-                    sx={{ minHeight: 32, mb: 1.5 }}
+                    spacing={0.5}
+                    sx={{ width: '100%', minHeight: 40, mb: 1.5 }}
                   >
-                    <Typography variant="caption">{previewRangeText}</Typography>
-                    {showImgList.length > previewPageSize && (
-                      <Pagination
-                        count={Math.ceil(showImgList.length / previewPageSize)}
-                        page={previewPage}
-                        onChange={(_, page) => setPreviewPage(page)}
-                        color="primary"
-                        size="small"
-                        siblingCount={0}
-                        boundaryCount={1}
-                      />
+                    {catalogNotice && currentView === 'favorites' && (
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={0.25}
+                        sx={{ minWidth: 0, flex: '1 1 auto' }}
+                      >
+                        <Typography
+                          variant="caption"
+                          noWrap
+                          sx={{
+                            minWidth: 0,
+                            color:
+                              catalogNotice.severity === 'warning'
+                                ? 'warning.main'
+                                : 'text.secondary'
+                          }}
+                        >
+                          {catalogNotice.message}
+                        </Typography>
+                        <Tooltip
+                          arrow
+                          componentsProps={{
+                            tooltip: {
+                              sx: {
+                                maxWidth: 360,
+                                px: 1.25,
+                                py: 1,
+                                color: '#FFFFFF',
+                                bgcolor: '#263238',
+                                boxShadow: '0 6px 18px rgba(23, 25, 28, 0.22)',
+                                '& .MuiTypography-root': {
+                                  color: 'inherit'
+                                }
+                              }
+                            },
+                            arrow: {
+                              sx: { color: '#263238' }
+                            }
+                          }}
+                          title={
+                            <Stack
+                              spacing={0.5}
+                              sx={{ maxWidth: 360, lineHeight: 1.45 }}
+                            >
+                              <Typography
+                                variant="caption"
+                                color="inherit"
+                                sx={{ fontWeight: 700 }}
+                              >
+                                读取说明
+                              </Typography>
+                              {(catalogWarnings.length
+                                ? catalogWarnings
+                                : [catalogNotice.message]
+                              ).map((warning, index) => (
+                                <Typography
+                                  key={`${warning}-${index}`}
+                                  variant="caption"
+                                  color="inherit"
+                                >
+                                  {warning}
+                                </Typography>
+                              ))}
+                              <Typography variant="caption" color="inherit">
+                                可用的表情仍会继续展示。
+                              </Typography>
+                            </Stack>
+                          }
+                        >
+                          <IconButton
+                            size="small"
+                            aria-label="查看专辑读取说明"
+                            sx={{
+                              p: 0.25,
+                              color:
+                                catalogNotice.severity === 'warning'
+                                  ? 'warning.main'
+                                  : 'text.secondary'
+                            }}
+                          >
+                            <HelpOutlineOutlinedIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
                     )}
+
+                    <Stack
+                      direction="row"
+                      alignItems="center"
+                      spacing={0.5}
+                      sx={{ ml: 'auto', flexShrink: 0 }}
+                    >
+                      {!isExporting && (
+                        <>
+                          <Button
+                            variant="text"
+                            color="inherit"
+                            size="small"
+                            startIcon={<DownloadIcon sx={{ fontSize: 17 }} />}
+                            onClick={startNewExport}
+                            sx={{
+                              color: 'text.secondary',
+                              minWidth: 'auto',
+                              px: 1,
+                              '&:hover': {
+                                color: 'text.primary',
+                                bgcolor: '#F3F5F4'
+                              }
+                            }}
+                          >
+                            导出全部
+                          </Button>
+                          {incompleteExport && (
+                            <Button
+                              variant="text"
+                              color="inherit"
+                              size="small"
+                              onClick={continueLastExport}
+                              sx={{
+                                color: 'text.secondary',
+                                minWidth: 'auto',
+                                px: 1,
+                                '&:hover': {
+                                  color: 'text.primary',
+                                  bgcolor: '#F3F5F4'
+                                }
+                              }}
+                            >
+                              继续上次
+                            </Button>
+                          )}
+                        </>
+                      )}
+                      <Typography variant="caption" sx={{ mx: 0.5 }}>
+                        {previewRangeText}
+                      </Typography>
+                      {showImgList.length > previewPageSize && (
+                        <Pagination
+                          count={Math.ceil(
+                            showImgList.length / previewPageSize
+                          )}
+                          page={previewPage}
+                          onChange={(_, page) => setPreviewPage(page)}
+                          color="primary"
+                          size="small"
+                          siblingCount={0}
+                          boundaryCount={1}
+                        />
+                      )}
+                    </Stack>
                   </Stack>
                 )}
 
@@ -2184,7 +2246,8 @@ function App() {
                     aria-label="正在加载专辑图片"
                     sx={{
                       display: 'grid',
-                      gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
+                      gridTemplateColumns:
+                        'repeat(auto-fill, minmax(132px, 1fr))',
                       gap: 1.25
                     }}
                   >
@@ -2202,7 +2265,6 @@ function App() {
                     showImgList={showImgList}
                     previewPage={previewPage}
                     previewPageSize={previewPageSize}
-                    copyToClipboard={copyToClipboard}
                     copyEmojiImage={copyEmojiImage}
                     copyingEmojiKeys={copyingEmojiKeys}
                     openSystem={openSystem}
@@ -2215,33 +2277,33 @@ function App() {
                         : undefined
                     }
                     emptyDescription={
-                      currentView.startsWith('album|')
-                        ? currentStickerHubState.status === 'not_found'
-                          ? (
-                            <>
-                              专辑表情包由{' '}
-                              <Link
-                                component="button"
-                                type="button"
-                                underline="hover"
-                                onClick={() => void openStickerHub()}
-                                sx={{
-                                  p: 0,
-                                  border: 0,
-                                  bgcolor: 'transparent',
-                                  color: 'primary.main',
-                                  font: 'inherit',
-                                  fontWeight: 650,
-                                  cursor: 'pointer'
-                                }}
-                              >
-                                StickerHub API
-                              </Link>{' '}
-                              提供支持。你可以反馈这个专辑，帮助开发者补充收录。
-                            </>
-                          )
-                          : '请检查网络后重试'
-                        : undefined
+                      currentView.startsWith('album|') ? (
+                        currentStickerHubState.status === 'not_found' ? (
+                          <>
+                            专辑表情包由{' '}
+                            <Link
+                              component="button"
+                              type="button"
+                              underline="hover"
+                              onClick={() => void openStickerHub()}
+                              sx={{
+                                p: 0,
+                                border: 0,
+                                bgcolor: 'transparent',
+                                color: 'primary.main',
+                                font: 'inherit',
+                                fontWeight: 650,
+                                cursor: 'pointer'
+                              }}
+                            >
+                              StickerHub API
+                            </Link>{' '}
+                            提供支持。你可以反馈这个专辑，帮助开发者补充收录。
+                          </>
+                        ) : (
+                          '请检查网络后重试'
+                        )
+                      ) : undefined
                     }
                     emptyAction={
                       currentView.startsWith('album|') &&
@@ -2275,172 +2337,9 @@ function App() {
                   />
                 )}
               </>
-            ) : null}
-              </>
             )}
 
-            {activeTab === 'export' && (
-              <Stack spacing={2} sx={{ maxWidth: 720 }}>
-                {!rawUrls.length ? (
-                  <Alert
-                    severity="info"
-                    action={
-                      <Button
-                        color="inherit"
-                        size="small"
-                        onClick={() => setActiveTab('preview')}
-                      >
-                        去获取
-                      </Button>
-                    }
-                  >
-                    请先在“表情预览”中获取表情。
-                  </Alert>
-                ) : (
-                  <>
-                    <Stack direction="row" spacing={1.25} flexWrap="wrap">
-                      <Button
-                        size="large"
-                        variant="contained"
-                        onClick={startNewExport}
-                        disabled={isExporting || cancelRequested}
-                      >
-                        开始导出
-                      </Button>
-                      {incompleteExport && (
-                        <Button
-                          size="large"
-                          variant="outlined"
-                          onClick={continueLastExport}
-                          disabled={isExporting || cancelRequested}
-                        >
-                          继续上次导出（断点续跑）
-                        </Button>
-                      )}
-                      <Button
-                        color="warning"
-                        size="large"
-                        variant="outlined"
-                        onClick={cancelExport}
-                        disabled={!isExporting || cancelRequested}
-                      >
-                        {cancelRequested ? '正在取消…' : '取消导出'}
-                      </Button>
-                    </Stack>
-
-                    <Typography variant="body1" sx={{ fontWeight: 700 }}>
-                      导出设置
-                    </Typography>
-                    <FormControl component="fieldset">
-                      <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
-                        导出分组
-                      </Typography>
-                      <RadioGroup
-                        value={exportGroupMode}
-                        onChange={(event) =>
-                          setExportGroupMode(
-                            event.target.value as 'recommended' | 'none' | 'custom'
-                          )
-                        }
-                      >
-                        <FormControlLabel
-                          value="recommended"
-                          control={<Radio disabled={isExporting} />}
-                          label="每 50 张分组（默认/推荐）"
-                          disabled={isExporting}
-                        />
-                        <FormControlLabel
-                          value="none"
-                          control={<Radio disabled={isExporting} />}
-                          label="不分组（全部放在一个目录）"
-                          disabled={isExporting}
-                        />
-                        <FormControlLabel
-                          value="custom"
-                          control={<Radio disabled={isExporting} />}
-                          label="自定义分组大小"
-                          disabled={isExporting}
-                        />
-                      </RadioGroup>
-                    </FormControl>
-                    {exportGroupMode === 'custom' && (
-                      <TextField
-                        type="number"
-                        size="small"
-                        label="自定义分组大小"
-                        value={exportCustomGroupSize}
-                        onChange={(event) =>
-                          setExportCustomGroupSize(
-                            Math.max(1, Math.floor(Number(event.target.value) || 1))
-                          )
-                        }
-                        disabled={isExporting}
-                        inputProps={{ min: 1 }}
-                      />
-                    )}
-                    <Stack direction="row" spacing={2} flexWrap="wrap">
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={exportResume}
-                            onChange={(event) => setExportResume(event.target.checked)}
-                            disabled={isExporting}
-                          />
-                        }
-                        label="断点续跑（跳过已存在文件）"
-                      />
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={exportAutoOpen}
-                            onChange={(event) => setExportAutoOpen(event.target.checked)}
-                            disabled={isExporting}
-                          />
-                        }
-                        label="导出完成后自动打开目录"
-                      />
-                    </Stack>
-                    <Typography variant="body2" color="text.secondary">
-                      导出目录固定在「下载」目录下；每次导出都会创建一个新文件夹。
-                    </Typography>
-                    {(isExporting || exportProgress > 0) && (
-                      <Box>
-                        <Typography variant="body2" sx={{ mb: 0.75 }}>
-                          导出进度：{exportProgress}/{showImgList.length}（成功：
-                          {exportOk}，跳过：{exportSkipped}，失败：{exportFailed}）
-                        </Typography>
-                        <LinearProgress
-                          variant="determinate"
-                          value={
-                            showImgList.length
-                              ? (exportProgress / showImgList.length) * 100
-                              : 0
-                          }
-                        />
-                      </Box>
-                    )}
-                    {lastExportDir && (
-                      <Stack direction="row" spacing={1.25} alignItems="center">
-                        <Typography variant="body2" color="text.secondary">
-                          上次导出：{lastExportDir}
-                        </Typography>
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() =>
-                            openExportDir(downloadDirPath, lastExportDir).catch(() => {})
-                          }
-                        >
-                          打开
-                        </Button>
-                      </Stack>
-                    )}
-                  </>
-                )}
-              </Stack>
-            )}
-
-            {activeTab === 'advanced' && (
+            {currentView === 'settings' && (
               <Box sx={{ maxWidth: 720 }}>
                 <Stack spacing={3}>
                   <SettingsGroup title="显示与读取">
@@ -2449,18 +2348,26 @@ function App() {
                       description="影响预览顺序和导出顺序"
                       action={
                         <FormControl size="small" sx={{ minWidth: 180 }}>
-                          <InputLabel id="emoji-sort-order-label">表情排序</InputLabel>
+                          <InputLabel id="emoji-sort-order-label">
+                            表情排序
+                          </InputLabel>
                           <Select
                             labelId="emoji-sort-order-label"
                             label="表情排序"
                             value={emojiSortOrder}
                             onChange={(event) =>
-                              setEmojiSortOrder(event.target.value as EmojiSortOrder)
+                              setEmojiSortOrder(
+                                event.target.value as EmojiSortOrder
+                              )
                             }
                             disabled={isExporting}
                           >
-                            <MenuItem value="newest-first">最新添加在前</MenuItem>
-                            <MenuItem value="oldest-first">最早添加在前</MenuItem>
+                            <MenuItem value="newest-first">
+                              最新添加在前
+                            </MenuItem>
+                            <MenuItem value="oldest-first">
+                              最早添加在前
+                            </MenuItem>
                           </Select>
                         </FormControl>
                       }
@@ -2584,7 +2491,9 @@ function App() {
                         label="微信应用位置"
                         helperText="通常无需修改；仅在应用无法找到微信时重新选择"
                         value={wechatAppPath}
-                        onChange={(event) => setWechatAppPath(event.target.value)}
+                        onChange={(event) =>
+                          setWechatAppPath(event.target.value)
+                        }
                         disabled={isExporting}
                       />
                       <Button
@@ -2628,7 +2537,9 @@ function App() {
                     />
                     {wechatDataAccessError && (
                       <Box sx={{ px: 2, pb: 1.5 }}>
-                        <Alert severity="warning">{wechatDataAccessError}</Alert>
+                        <Alert severity="warning">
+                          {wechatDataAccessError}
+                        </Alert>
                       </Box>
                     )}
                   </SettingsGroup>
@@ -2637,7 +2548,9 @@ function App() {
                     <SettingsRow
                       title="导出微信表情包"
                       description="将微信表情整理并导出到本地"
-                      action={<Typography variant="body2">v{APP_VERSION}</Typography>}
+                      action={
+                        <Typography variant="body2">v{APP_VERSION}</Typography>
+                      }
                     />
                     <Divider />
                     <SettingsRow
@@ -2722,6 +2635,29 @@ function App() {
                     />
                   </SettingsGroup>
 
+                  {lastExportDir && (
+                    <SettingsGroup title="最近导出">
+                      <SettingsRow
+                        title={lastExportDir}
+                        description="当前账号最近一次导出的目录"
+                        action={
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() =>
+                              openExportDir(
+                                downloadDirPath,
+                                lastExportDir
+                              ).catch(() => {})
+                            }
+                          >
+                            打开目录
+                          </Button>
+                        }
+                      />
+                    </SettingsGroup>
+                  )}
+
                   <SettingsGroup title="兼容性">
                     <SettingsRow
                       title="微信 4.x"
@@ -2778,8 +2714,116 @@ function App() {
             />
           </Box>
         )}
-      </Paper>
       </Box>
+
+      <Menu
+        anchorEl={settingsAnchorEl}
+        open={openSettings}
+        onClose={() => setSettingsAnchorEl(null)}
+        PaperProps={{
+          sx: {
+            width: 292,
+            mt: 0.75,
+            border: '1px solid',
+            borderColor: 'divider',
+            boxShadow: '0 10px 28px rgba(23, 25, 28, 0.14)'
+          }
+        }}
+        transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+        anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+      >
+        <Box sx={{ px: 2, py: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ mb: 1.25, fontWeight: 700 }}>
+            导出设置
+          </Typography>
+
+          <Typography
+            variant="caption"
+            sx={{
+              color: 'text.secondary',
+              fontWeight: 600,
+              display: 'block',
+              mb: 1
+            }}
+          >
+            分组方式
+          </Typography>
+          <RadioGroup
+            value={exportGroupMode}
+            onChange={(event) =>
+              setExportGroupMode(
+                event.target.value as 'recommended' | 'none' | 'custom'
+              )
+            }
+            sx={{ mb: 2 }}
+          >
+            <FormControlLabel
+              value="recommended"
+              control={<Radio size="small" disabled={isExporting} />}
+              label={<Typography variant="body2">每 50 个分为一组</Typography>}
+              disabled={isExporting}
+            />
+            <FormControlLabel
+              value="none"
+              control={<Radio size="small" disabled={isExporting} />}
+              label={<Typography variant="body2">不分组</Typography>}
+              disabled={isExporting}
+            />
+            <FormControlLabel
+              value="custom"
+              control={<Radio size="small" disabled={isExporting} />}
+              label={<Typography variant="body2">自定义分组</Typography>}
+              disabled={isExporting}
+            />
+          </RadioGroup>
+
+          {exportGroupMode === 'custom' && (
+            <TextField
+              fullWidth
+              size="small"
+              type="number"
+              label="每组数量"
+              value={exportCustomGroupSize}
+              onChange={(event) =>
+                setExportCustomGroupSize(
+                  Math.max(1, Math.floor(Number(event.target.value) || 1))
+                )
+              }
+              disabled={isExporting}
+              sx={{ mb: 2 }}
+            />
+          )}
+
+          <Divider sx={{ my: 1.5 }} />
+
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={exportResume}
+                onChange={(event) => setExportResume(event.target.checked)}
+                disabled={isExporting}
+              />
+            }
+            label={<Typography variant="body2">断点续跑</Typography>}
+            sx={{ mb: 0.5, display: 'flex' }}
+            disabled={isExporting}
+          />
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={exportAutoOpen}
+                onChange={(event) => setExportAutoOpen(event.target.checked)}
+                disabled={isExporting}
+              />
+            }
+            label={<Typography variant="body2">完成后打开文件夹</Typography>}
+            sx={{ display: 'flex' }}
+            disabled={isExporting}
+          />
+        </Box>
+      </Menu>
 
       {/* Dialogs and Snackbars */}
       <Dialog
@@ -2804,7 +2848,10 @@ function App() {
                 borderRadius: 1
               }}
             >
-              <Stack direction="row" divider={<Divider orientation="vertical" flexItem />}>
+              <Stack
+                direction="row"
+                divider={<Divider orientation="vertical" flexItem />}
+              >
                 <Box textAlign="center" sx={{ flex: 1 }}>
                   <Typography variant="h6" color="primary.main">
                     {exportResult?.ok}
@@ -2855,7 +2902,8 @@ function App() {
         <DialogContent>
           <Stack spacing={2}>
             <Typography variant="body2" color="text.secondary">
-              下一步会打开浏览器中的 GitHub 新建页面。你需要登录 GitHub 并手动点击提交，客户端不会自动提交。
+              下一步会打开浏览器中的 GitHub 新建页面。你需要登录 GitHub
+              并手动点击提交，客户端不会自动提交。
             </Typography>
             <Typography variant="body2" color="text.secondary">
               专辑表情包由{' '}
@@ -2994,7 +3042,10 @@ function App() {
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={closeMissingAlbumEmail} disabled={emailFeedbackSending}>
+          <Button
+            onClick={closeMissingAlbumEmail}
+            disabled={emailFeedbackSending}
+          >
             取消
           </Button>
           <Button
@@ -3017,7 +3068,15 @@ function App() {
         <DialogTitle>排序方式与上次导出不同</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary">
-            上次未完成的导出使用“{incompleteExport?.sortOrder === 'oldest-first' ? '最早添加在前' : '最新添加在前'}”，当前设置为“{emojiSortOrder === 'oldest-first' ? '最早添加在前' : '最新添加在前'}”。
+            上次未完成的导出使用“
+            {incompleteExport?.sortOrder === 'oldest-first'
+              ? '最早添加在前'
+              : '最新添加在前'}
+            ”，当前设置为“
+            {emojiSortOrder === 'oldest-first'
+              ? '最早添加在前'
+              : '最新添加在前'}
+            ”。
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             继续上次导出会保持原顺序；按当前顺序开始则会创建新的导出目录。

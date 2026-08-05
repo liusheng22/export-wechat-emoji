@@ -20,66 +20,66 @@ const mocks = vi.hoisted(() => {
   }))
 
   return {
-  messageMock: vi.fn(async () => {}),
-  openDialogMock: vi.fn(
-    async (): Promise<string | Array<string> | null> => null
-  ),
-  listenMock: vi.fn(async () => () => {}),
-  writeTextMock: vi.fn(async (value: string) => {
-    void value
-  }),
-  fsExistsMock: vi.fn(async (path: string) => {
-    void path
-    return false
-  }),
-  removeFileMock: vi.fn(async (path: string) => {
-    void path
-  }),
-  createDirMock: vi.fn(async () => {}),
-  writeBinaryFileMock: vi.fn(async () => {}),
-  writeTextFileMock: vi.fn(async () => {}),
-  pathJoinMock: vi.fn(async (...parts: string[]) =>
-    parts.join('/').replace(/\/+/g, '/')
-  ),
-  dirnameMock: vi.fn(
-    async (input: string) => input.split('/').slice(0, -1).join('/') || '/'
-  ),
-  downloadDirMock: vi.fn(async () => '/Users/tester/Downloads'),
-  homeDirMock: vi.fn(async () => '/Users/tester'),
-  appDataDirMock: vi.fn(
-    async () => '/Users/tester/Library/Application Support/me.lius.wxemoticon'
-  ),
-  commandExecuteMock: vi.fn(async () => ({})),
-  invokeMock: vi.fn(async () => false),
-  emailFeedbackPostMock,
-  getClientMock: vi.fn(async () => ({
-    get: vi.fn(),
-    post: emailFeedbackPostMock
-  })),
-  findEmojiTargetsWithMetaMock: vi.fn(),
-  autoDumpEmoticonUrlsV4Mock: vi.fn(),
-  buildEmoticonCatalogV4Mock: vi.fn(),
-  extractFavUrlsMock: vi.fn(),
-  fetchBinaryWithFallbackMock: vi.fn(),
-  ensureExportRootDirMock: vi.fn(async () => {}),
-  writeUsageReadmeMock: vi.fn(async () => {}),
-  writeUrlsFileMock: vi.fn(async () => {}),
-  writeDbKeyFileMock: vi.fn(async () => {}),
-  exportedEmojiExistsByKeyMock: vi.fn(async (options?: { index: number }) => {
-    void options
-    return false
-  }),
-  exportOneEmojiMock: vi.fn(async () => {}),
-  openExportDirMock: vi.fn(async () => {}),
-  checkWeChatRunningMock: vi.fn(),
-  diagnoseWeChatEnvironmentMock: vi.fn(),
-  readCurrentWeChatAccountProfileMock: vi.fn(async () => null),
-  readStickerHubAlbumCacheMock: vi.fn(),
-  refreshStickerHubAlbumMock: vi.fn(),
-  restoreWeChatDataBookmarkMock: vi.fn(async () => null),
-  saveWeChatDataBookmarkMock: vi.fn(),
-  createObjectUrlMock: vi.fn(() => 'blob:stickerhub-preview'),
-  revokeObjectUrlMock: vi.fn()
+    messageMock: vi.fn(async () => {}),
+    openDialogMock: vi.fn(
+      async (): Promise<string | Array<string> | null> => null
+    ),
+    listenMock: vi.fn(async () => () => {}),
+    writeTextMock: vi.fn(async (value: string) => {
+      void value
+    }),
+    fsExistsMock: vi.fn(async (path: string) => {
+      void path
+      return false
+    }),
+    removeFileMock: vi.fn(async (path: string) => {
+      void path
+    }),
+    createDirMock: vi.fn(async () => {}),
+    writeBinaryFileMock: vi.fn(async () => {}),
+    writeTextFileMock: vi.fn(async () => {}),
+    pathJoinMock: vi.fn(async (...parts: string[]) =>
+      parts.join('/').replace(/\/+/g, '/')
+    ),
+    dirnameMock: vi.fn(
+      async (input: string) => input.split('/').slice(0, -1).join('/') || '/'
+    ),
+    downloadDirMock: vi.fn(async () => '/Users/tester/Downloads'),
+    homeDirMock: vi.fn(async () => '/Users/tester'),
+    appDataDirMock: vi.fn(
+      async () => '/Users/tester/Library/Application Support/me.lius.wxemoticon'
+    ),
+    commandExecuteMock: vi.fn(async () => ({})),
+    invokeMock: vi.fn(async () => false),
+    emailFeedbackPostMock,
+    getClientMock: vi.fn(async () => ({
+      get: vi.fn(),
+      post: emailFeedbackPostMock
+    })),
+    findEmojiTargetsWithMetaMock: vi.fn(),
+    autoDumpEmoticonUrlsV4Mock: vi.fn(),
+    buildEmoticonCatalogV4Mock: vi.fn(),
+    extractFavUrlsMock: vi.fn(),
+    fetchBinaryWithFallbackMock: vi.fn(),
+    ensureExportRootDirMock: vi.fn(async () => {}),
+    writeUsageReadmeMock: vi.fn(async () => {}),
+    writeUrlsFileMock: vi.fn(async () => {}),
+    writeDbKeyFileMock: vi.fn(async () => {}),
+    exportedEmojiExistsByKeyMock: vi.fn(async (options?: { index: number }) => {
+      void options
+      return false
+    }),
+    exportOneEmojiMock: vi.fn(async () => {}),
+    openExportDirMock: vi.fn(async () => {}),
+    checkWeChatRunningMock: vi.fn(),
+    diagnoseWeChatEnvironmentMock: vi.fn(),
+    readCurrentWeChatAccountProfileMock: vi.fn(async () => null),
+    readStickerHubAlbumCacheMock: vi.fn(),
+    refreshStickerHubAlbumMock: vi.fn(),
+    restoreWeChatDataBookmarkMock: vi.fn(async () => null),
+    saveWeChatDataBookmarkMock: vi.fn(),
+    createObjectUrlMock: vi.fn(() => 'blob:stickerhub-preview'),
+    revokeObjectUrlMock: vi.fn()
   }
 })
 
@@ -289,13 +289,19 @@ function setExistsBehavior(options?: {
 async function renderApp() {
   const user = userEvent.setup()
   render(<App />)
-  await screen.findByRole('button', { name: '获取并预览' })
+  await screen.findByRole('button', {
+    name: /^(一键获取并预览|重新读取|正在获取…|正在重新获取…)$/
+  })
   return { user }
 }
 
 async function waitForPreviewActionEnabled() {
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '获取并预览' })).toBeEnabled()
+    expect(
+      screen.getByRole('button', {
+        name: /^(一键获取并预览|重新读取)$/
+      })
+    ).toBeEnabled()
   )
 }
 
@@ -334,9 +340,7 @@ beforeEach(() => {
     logFile: '/tmp/emoticon_urls.log',
     urls: []
   })
-  mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(
-    makeFavoritesCatalog([])
-  )
+  mocks.buildEmoticonCatalogV4Mock.mockResolvedValue(makeFavoritesCatalog([]))
   mocks.extractFavUrlsMock.mockResolvedValue([])
   mocks.readStickerHubAlbumCacheMock.mockResolvedValue({
     status: 'missing',
@@ -396,9 +400,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(await screen.findByRole('button', { name: '去授权' }))
-    await user.click(
-      screen.getByRole('button', { name: '授权微信数据目录' })
-    )
+    await user.click(screen.getByRole('button', { name: '授权微信数据目录' }))
 
     await waitFor(() =>
       expect(mocks.openDialogMock).toHaveBeenCalledWith({
@@ -409,12 +411,10 @@ describe('App GUI flow', () => {
       })
     )
     expect(mocks.saveWeChatDataBookmarkMock).toHaveBeenCalledWith(dataPath)
-    expect(
-      await screen.findByText('已保存目录授权')
-    ).toBeInTheDocument()
+    expect(await screen.findByText('已保存目录授权')).toBeInTheDocument()
   })
 
-  it('opens on the preview tab without the redundant page title and routes empty export state back to preview', async () => {
+  it('opens on the favorites page without a tab bar and keeps settings as a separate page', async () => {
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
 
     const { user } = await renderApp()
@@ -422,19 +422,17 @@ describe('App GUI flow', () => {
     expect(screen.queryByText('导出微信表情包')).not.toBeInTheDocument()
     expect(screen.queryByText('账号')).not.toBeInTheDocument()
     expect(screen.queryByText(/该账号最后更新时间/)).not.toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: '表情预览' })).toHaveAttribute(
-      'aria-selected',
-      'true'
-    )
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '个人收藏' })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('tab', { name: '导出' }))
-    expect(screen.getByText('请先在“表情预览”中获取表情。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument()
+    expect(screen.getByText('显示与读取')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '去获取' }))
-    expect(screen.getByRole('tab', { name: '表情预览' })).toHaveAttribute(
-      'aria-selected',
-      'true'
-    )
+    await user.click(screen.getByRole('button', { name: '个人收藏' }))
+    expect(
+      screen.getByRole('heading', { name: '个人收藏' })
+    ).toBeInTheDocument()
   })
 
   it('shows newest emojis first by default and persists an oldest-first preference', async () => {
@@ -454,7 +452,7 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 2' })
+      await screen.findByRole('button', { name: '查看表情大图 2' })
     ).toBeInTheDocument()
 
     const previewSources = () =>
@@ -463,20 +461,19 @@ describe('App GUI flow', () => {
       ).map((img) => img.src)
     expect(previewSources()[0]).toContain('m=newest')
 
-    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    await user.click(screen.getByRole('button', { name: '设置' }))
     await user.click(screen.getByRole('combobox', { name: '表情排序' }))
     await user.click(screen.getByRole('option', { name: '最早添加在前' }))
 
     expect(localStorage.getItem('wxemoticon_emoji_sort_order')).toBe(
       'oldest-first'
     )
-    await user.click(screen.getByRole('tab', { name: '表情预览' }))
+    await user.click(screen.getByRole('button', { name: '个人收藏' }))
     expect(previewSources()[0]).toContain('m=oldest')
   })
 
   it('copies image data from the preview and reuses it for export while keeping overlay actions independent', async () => {
-    const emojiUrl =
-      'https://wxapp.tc.qq.com/1/stodownload?m=shared&filekey=1'
+    const emojiUrl = 'https://wxapp.tc.qq.com/1/stodownload?m=shared&filekey=1'
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeV4Target()])
     mocks.autoDumpEmoticonUrlsV4Mock.mockResolvedValue({
       wxid: 'wxid_test_123',
@@ -495,14 +492,12 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
-    const imageAction = await screen.findByRole('button', {
-      name: '下载并复制表情 1'
+    const previewAction = await screen.findByRole('button', {
+      name: '查看表情大图 1'
     })
+    const copyAction = screen.getByRole('button', { name: '复制图片' })
 
-    const previewPaper = imageAction.closest('.MuiPaper-root') as HTMLElement
-    expect(
-      within(previewPaper).getByRole('tab', { name: '表情预览' })
-    ).toBeInTheDocument()
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
     expect(screen.queryByText(/个表情包预览/)).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: '复制链接' })
@@ -511,7 +506,7 @@ describe('App GUI flow', () => {
       screen.queryByRole('button', { name: '打开链接' })
     ).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '查看大图' }))
+    await user.click(previewAction)
     expect(mocks.invokeMock).not.toHaveBeenCalled()
     expect(mocks.commandExecuteMock).not.toHaveBeenCalled()
 
@@ -519,7 +514,7 @@ describe('App GUI flow', () => {
     expect(mocks.commandExecuteMock).toHaveBeenCalledTimes(1)
     expect(mocks.invokeMock).not.toHaveBeenCalled()
 
-    await user.click(imageAction)
+    await user.click(copyAction)
     await waitFor(() =>
       expect(mocks.invokeMock).toHaveBeenCalledWith(
         'cache_and_copy_emoji_file',
@@ -531,11 +526,12 @@ describe('App GUI flow', () => {
       )
     )
     expect(mocks.writeTextMock).not.toHaveBeenCalled()
-    expect(await screen.findByText('已复制原图文件')).toBeInTheDocument()
+    expect(
+      await screen.findByText('已复制图片，可直接粘贴到聊天窗口')
+    ).toBeInTheDocument()
     expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(1)
 
-    await user.click(screen.getByRole('tab', { name: '导出' }))
-    await user.click(screen.getByRole('button', { name: '开始导出' }))
+    await user.click(screen.getByRole('button', { name: '导出全部' }))
     expect(
       await screen.findByRole('dialog', { name: '导出完成' })
     ).toBeInTheDocument()
@@ -543,7 +539,7 @@ describe('App GUI flow', () => {
     expect(mocks.exportOneEmojiMock).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps preview loading active while the user switches tabs', async () => {
+  it('keeps preview loading active while the user opens settings', async () => {
     const dump = createDeferred<{
       wxid: string
       dbKey: string
@@ -561,8 +557,8 @@ describe('App GUI flow', () => {
       expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledTimes(1)
     )
 
-    await user.click(screen.getByRole('tab', { name: '导出' }))
-    expect(screen.getByText('请先在“表情预览”中获取表情。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument()
 
     dump.resolve({
       wxid: 'wxid_test_123',
@@ -573,13 +569,10 @@ describe('App GUI flow', () => {
       urls: ['https://wxapp.tc.qq.com/1/stodownload?m=done&filekey=1']
     })
 
+    await user.click(screen.getByRole('button', { name: '个人收藏' }))
     expect(
-      await screen.findByRole('button', { name: '开始导出' })
+      await screen.findByRole('button', { name: '查看表情大图 1' })
     ).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: '导出' })).toHaveAttribute(
-      'aria-selected',
-      'true'
-    )
   })
 
   it('restores a persisted oldest-first preference on startup', async () => {
@@ -600,13 +593,13 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 2' })
+      await screen.findByRole('button', { name: '查看表情大图 2' })
     ).toBeInTheDocument()
 
     const firstImage =
       document.querySelector<HTMLImageElement>('.img-preview img')
     expect(firstImage?.src).toContain('m=oldest')
-    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    await user.click(screen.getByRole('button', { name: '设置' }))
     expect(
       screen.getByRole('combobox', { name: '表情排序' })
     ).toHaveTextContent('最早添加在前')
@@ -639,7 +632,9 @@ describe('App GUI flow', () => {
     expect(
       await screen.findAllByText(/无法读取微信数据.*完全磁盘访问权限/)
     ).not.toHaveLength(0)
-    expect(screen.getByRole('button', { name: '获取并预览' })).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: '一键获取并预览' })
+    ).toBeDisabled()
     expect(mocks.messageMock).not.toHaveBeenCalled()
   })
 
@@ -655,7 +650,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
     expect(
       await screen.findByText(/必须先完全退出微信才能继续/)
@@ -671,7 +666,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
     expect(
       await screen.findAllByText(
@@ -703,7 +698,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
     await expectPreviewImages(2)
     expect(screen.getByRole('button', { name: '导出全部' })).toBeInTheDocument()
@@ -736,7 +731,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
     await expectPreviewImages(3)
     expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(3)
@@ -769,15 +764,23 @@ describe('App GUI flow', () => {
     expect(screen.getByRole('combobox')).toHaveTextContent('wxid_test_123')
     expect(screen.queryByText('选择账号')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(
+      screen.getByRole('button', {
+        name: /^(一键获取并预览|重新读取)$/
+      })
+    )
 
     await expectPreviewImages(1)
     expect(mocks.checkWeChatRunningMock).not.toHaveBeenCalled()
     expect(
       screen.queryByText(/必须先完全退出微信才能继续/)
     ).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '刷新微信账号' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '刷新账号' })).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '刷新微信账号' })
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: '刷新账号' })
+    ).not.toBeInTheDocument()
   })
 
   it('loads a complete album from the API only after it is selected', async () => {
@@ -844,7 +847,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
     await expectPreviewImages(2)
     expect(mocks.readStickerHubAlbumCacheMock).not.toHaveBeenCalled()
@@ -859,8 +862,7 @@ describe('App GUI flow', () => {
   })
 
   it('uses only API members for a selected album and exports remote resources', async () => {
-    const productId =
-      'com.tencent.xin.emoticon.person.stiker_test_album'
+    const productId = 'com.tencent.xin.emoticon.person.stiker_test_album'
     const localMd5 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const missingMd5 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
@@ -875,7 +877,9 @@ describe('App GUI flow', () => {
     })
     mocks.buildEmoticonCatalogV4Mock.mockResolvedValue({
       mode: 'partial',
-      warnings: [],
+      warnings: [
+        '有 1 个专辑包含暂不可预览或不可导出的成员，已按可用资源继续展示。'
+      ],
       favorites: ['https://favorites.example/favorite.gif'],
       albums: [
         {
@@ -934,9 +938,19 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
 
     await expectPreviewImages(1)
+    expect(screen.getByText('部分专辑未完整显示')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '查看专辑读取说明' })
+    ).toBeInTheDocument()
+    await user.hover(screen.getByRole('button', { name: '查看专辑读取说明' }))
+    expect(
+      await screen.findByText(
+        '有 1 个专辑包含暂不可预览或不可导出的成员，已按可用资源继续展示。'
+      )
+    ).toBeInTheDocument()
     expect(mocks.readStickerHubAlbumCacheMock).not.toHaveBeenCalled()
     expect(mocks.refreshStickerHubAlbumMock).not.toHaveBeenCalled()
 
@@ -987,9 +1001,7 @@ describe('App GUI flow', () => {
           count: 1,
           urls: [],
           items: [],
-          members: [
-            { md5: 'dddddddddddddddddddddddddddddddd', sortOrder: 1 }
-          ],
+          members: [{ md5: 'dddddddddddddddddddddddddddddddd', sortOrder: 1 }],
           packageId: productId
         }
       ]
@@ -997,7 +1009,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await expectPreviewImages(1)
 
     await user.click(screen.getByText('未收录专辑'))
@@ -1005,25 +1017,33 @@ describe('App GUI flow', () => {
     expect(
       await screen.findByText('这个专辑还没有收录', { selector: 'h6' })
     ).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'StickerHub API' })).toBeInTheDocument()
-    expect(screen.getByText(/专辑表情包由.*提供支持。你可以反馈这个专辑/)).toBeInTheDocument()
-    expect(screen.getByText('未收录专辑', { selector: 'h5' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'StickerHub API' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/专辑表情包由.*提供支持。你可以反馈这个专辑/)
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('未收录专辑', { selector: 'h5' })
+    ).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: '通过 GitHub 反馈' })
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '邮件反馈' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '通过 GitHub 反馈' }))
-    expect(
-      await screen.findByText('确认通过 GitHub 反馈')
-    ).toBeInTheDocument()
+    expect(await screen.findByText('确认通过 GitHub 反馈')).toBeInTheDocument()
     expect(
       screen.getByText(
         '下一步会打开浏览器中的 GitHub 新建页面。你需要登录 GitHub 并手动点击提交，客户端不会自动提交。'
       )
     ).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '复制专辑 ID' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '打开 GitHub' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '复制专辑 ID' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '打开 GitHub' })
+    ).toBeInTheDocument()
     expect(mocks.commandExecuteMock).not.toHaveBeenCalled()
     const githubDialog = screen.getByRole('dialog', {
       name: '确认通过 GitHub 反馈'
@@ -1044,7 +1064,9 @@ describe('App GUI flow', () => {
       'user@example.com'
     )
     await user.click(screen.getByRole('button', { name: '发送反馈' }))
-    expect(await screen.findByText('反馈邮件已发送给开发者')).toBeInTheDocument()
+    expect(
+      await screen.findByText('反馈邮件已发送给开发者')
+    ).toBeInTheDocument()
     await waitForElementToBeRemoved(
       screen.getByRole('dialog', { name: '邮件反馈' })
     )
@@ -1110,16 +1132,14 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await user.click(screen.getByText('缓存专辑'))
     await expectPreviewImages(1)
 
     expect(mocks.readStickerHubAlbumCacheMock).toHaveBeenCalledWith(productId)
     expect(mocks.refreshStickerHubAlbumMock).not.toHaveBeenCalled()
     const image = screen.getByAltText('emoji') as HTMLImageElement
-    expect(image.src).toBe(
-      'https://cache.example/full.gif'
-    )
+    expect(image.src).toBe('https://cache.example/full.gif')
 
     mocks.fetchBinaryWithFallbackMock.mockResolvedValueOnce({
       ok: false,
@@ -1218,11 +1238,9 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await user.click(screen.getByText('第一个专辑'))
-    expect(
-      await screen.findByLabelText('正在加载专辑图片')
-    ).toBeInTheDocument()
+    expect(await screen.findByLabelText('正在加载专辑图片')).toBeInTheDocument()
 
     await user.click(screen.getByText('第二个专辑'))
     await expectPreviewImages(1)
@@ -1254,7 +1272,9 @@ describe('App GUI flow', () => {
         'https://second.example/full.gif'
       )
     )
-    expect(screen.getByText('第二个专辑', { selector: 'h5' })).toBeInTheDocument()
+    expect(
+      screen.getByText('第二个专辑', { selector: 'h5' })
+    ).toBeInTheDocument()
   })
 
   it('shows stale cache immediately and respects rate-limit retry time', async () => {
@@ -1305,7 +1325,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await user.click(screen.getByText('旧缓存专辑'))
 
     expect(
@@ -1362,14 +1382,12 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
 
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 1' })
+      await screen.findByRole('button', { name: '查看表情大图 1' })
     ).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: '正在重新获取…' })
-    ).toBeDisabled()
+    expect(screen.getByRole('button', { name: '正在重新获取…' })).toBeDisabled()
     expect(mocks.autoDumpEmoticonUrlsV4Mock).toHaveBeenCalledTimes(1)
 
-    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    await user.click(screen.getByRole('button', { name: '设置' }))
     await user.click(screen.getByRole('button', { name: '复制 db key' }))
     expect(mocks.writeTextMock).toHaveBeenCalledWith('e'.repeat(64))
 
@@ -1378,16 +1396,15 @@ describe('App GUI flow', () => {
     expect(
       await screen.findByText('已显示缓存，自动刷新失败，可手动重试')
     ).toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: '表情预览' }))
+    await user.click(screen.getByRole('button', { name: '个人收藏' }))
     expect(
-      screen.getByRole('button', { name: '下载并复制表情 1' })
+      screen.getByRole('button', { name: '查看表情大图 1' })
     ).toBeInTheDocument()
   })
 
   it('persists a legacy account preview and shows explicit cache information', async () => {
     const extract = createDeferred<Array<string>>()
-    const cachedUrl =
-      'https://wxapp.tc.qq.com/1/stodownload?m=legacy&filekey=1'
+    const cachedUrl = 'https://wxapp.tc.qq.com/1/stodownload?m=legacy&filekey=1'
     mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([makeLegacyTarget()])
     mocks.extractFavUrlsMock.mockReturnValueOnce(extract.promise)
 
@@ -1400,7 +1417,7 @@ describe('App GUI flow', () => {
 
     extract.resolve([cachedUrl])
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 1' })
+      await screen.findByRole('button', { name: '查看表情大图 1' })
     ).toBeInTheDocument()
 
     const cached = JSON.parse(
@@ -1413,7 +1430,7 @@ describe('App GUI flow', () => {
     )
     expect(cached.urls).toEqual([cachedUrl])
 
-    await user.click(screen.getByRole('tab', { name: '高级设置' }))
+    await user.click(screen.getByRole('button', { name: '设置' }))
     expect(
       screen.getByText(/已恢复该账号的本地 URL 缓存（1 条）/)
     ).toBeInTheDocument()
@@ -1455,7 +1472,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await expectPreviewImages(2)
 
     await user.click(screen.getByRole('button', { name: '导出全部' }))
@@ -1503,12 +1520,10 @@ describe('App GUI flow', () => {
 
     const user = userEvent.setup()
     const firstRender = render(<App />)
-    await user.click(await screen.findByRole('tab', { name: '导出' }))
-    await user.click(
-      screen.getByRole('radio', { name: '自定义分组大小' })
-    )
+    await user.click(await screen.findByRole('button', { name: '导出设置' }))
+    await user.click(screen.getByRole('radio', { name: '自定义分组' }))
     const customSize = screen.getByRole('spinbutton', {
-      name: '自定义分组大小'
+      name: '每组数量'
     })
     await user.type(customSize, '37', {
       initialSelectionStart: 0,
@@ -1516,18 +1531,14 @@ describe('App GUI flow', () => {
     })
     await user.click(
       screen.getByRole('checkbox', {
-        name: '断点续跑（跳过已存在文件）'
+        name: '断点续跑'
       })
     )
-    await user.click(
-      screen.getByRole('checkbox', { name: '导出完成后自动打开目录' })
-    )
+    await user.click(screen.getByRole('checkbox', { name: '完成后打开文件夹' }))
 
     await waitFor(() =>
       expect(
-        JSON.parse(
-          localStorage.getItem('wxemoticon_export_settings') || '{}'
-        )
+        JSON.parse(localStorage.getItem('wxemoticon_export_settings') || '{}')
       ).toEqual({
         version: 1,
         groupMode: 'custom',
@@ -1539,21 +1550,17 @@ describe('App GUI flow', () => {
 
     firstRender.unmount()
     render(<App />)
-    await user.click(await screen.findByRole('tab', { name: '导出' }))
+    await user.click(await screen.findByRole('button', { name: '导出设置' }))
 
-    expect(
-      screen.getByRole('radio', { name: '自定义分组大小' })
-    ).toBeChecked()
-    expect(
-      screen.getByRole('spinbutton', { name: '自定义分组大小' })
-    ).toHaveValue(37)
+    expect(screen.getByRole('radio', { name: '自定义分组' })).toBeChecked()
+    expect(screen.getByRole('spinbutton', { name: '每组数量' })).toHaveValue(37)
     expect(
       screen.getByRole('checkbox', {
-        name: '断点续跑（跳过已存在文件）'
+        name: '断点续跑'
       })
     ).not.toBeChecked()
     expect(
-      screen.getByRole('checkbox', { name: '导出完成后自动打开目录' })
+      screen.getByRole('checkbox', { name: '完成后打开文件夹' })
     ).not.toBeChecked()
   })
 
@@ -1592,9 +1599,7 @@ describe('App GUI flow', () => {
       ])
     )
     expect(
-      localStorage.getItem(
-        'wxemoticon_preview_cache|v4|wxid_test_123'
-      )
+      localStorage.getItem('wxemoticon_preview_cache|v4|wxid_test_123')
     ).toBeNull()
     expect(await screen.findByText('已清除当前账号缓存')).toBeInTheDocument()
   })
@@ -1617,7 +1622,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await expectPreviewImages(1)
 
     await user.click(screen.getByRole('button', { name: '设置' }))
@@ -1668,7 +1673,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     await waitForPreviewActionEnabled()
-    await user.click(screen.getByRole('button', { name: '获取并预览' }))
+    await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     await expectPreviewImages(2)
 
     await user.click(screen.getByRole('button', { name: '导出全部' }))
@@ -1694,9 +1699,7 @@ describe('App GUI flow', () => {
     await user.click(screen.getByRole('button', { name: '关闭' }))
     await waitForElementToBeRemoved(() => screen.queryByRole('dialog'))
 
-    expect(
-      screen.getByRole('button', { name: '继续上次' })
-    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '继续上次' })).toBeInTheDocument()
 
     mocks.exportedEmojiExistsByKeyMock.mockImplementation(
       async (input?: { index: number }) => input?.index === 0
@@ -1708,9 +1711,7 @@ describe('App GUI flow', () => {
       contentType: 'image/gif'
     })
 
-    await user.click(
-      screen.getByRole('button', { name: '继续上次' })
-    )
+    await user.click(screen.getByRole('button', { name: '继续上次' }))
 
     const completionDialog = await screen.findByRole('dialog', {
       name: '导出完成'
@@ -1743,19 +1744,19 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 1' })
+      await screen.findByRole('button', { name: '查看表情大图 1' })
     ).toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: '导出' }))
-    await user.click(screen.getByRole('button', { name: '开始导出' }))
+    await user.click(screen.getByRole('button', { name: '导出全部' }))
     await waitFor(() =>
       expect(mocks.fetchBinaryWithFallbackMock).toHaveBeenCalledTimes(1)
     )
 
-    await user.click(screen.getByRole('tab', { name: '表情预览' }))
-    expect(screen.getByRole('tab', { name: '表情预览' })).toHaveAttribute(
-      'aria-selected',
-      'true'
-    )
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '个人收藏' }))
+    expect(
+      screen.getByRole('heading', { name: '个人收藏' })
+    ).toBeInTheDocument()
 
     download.resolve({
       ok: true,
@@ -1790,12 +1791,9 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 2' })
+      await screen.findByRole('button', { name: '查看表情大图 2' })
     ).toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: '导出' }))
-    await user.click(
-      screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
-    )
+    await user.click(screen.getByRole('button', { name: '继续上次' }))
 
     expect(
       await screen.findByRole('dialog', {
@@ -1852,12 +1850,9 @@ describe('App GUI flow', () => {
     const { user } = await renderApp()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(
-      await screen.findByRole('button', { name: '下载并复制表情 2' })
+      await screen.findByRole('button', { name: '查看表情大图 2' })
     ).toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: '导出' }))
-    await user.click(
-      screen.getByRole('button', { name: '继续上次导出（断点续跑）' })
-    )
+    await user.click(screen.getByRole('button', { name: '继续上次' }))
     await user.click(
       await screen.findByRole('button', {
         name: '按当前排序开始新的导出'

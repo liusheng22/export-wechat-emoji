@@ -12,6 +12,8 @@ dist
 dist-ssr
 README
 docs
+_docs
+.tmp
 *.local
 tools/wechat-key-dumper/*.dylib
 cli/target

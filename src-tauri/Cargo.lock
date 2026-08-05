@@ -4799,6 +4799,7 @@ dependencies = [
  "hmac",
  "md5",
  "miniz_oxide 0.8.9",
+ "objc",
  "pbkdf2",
  "plist",
  "reqwest",

@@ -66,7 +66,8 @@
       "targets": "all",
       "identifier": "me.lius.wxemoticon",
       "macOS": {
-        "exceptionDomain": "wxapp.tc.qq.com,vweixinf.tc.qq.com,wx.qlogo.cn"
+        "exceptionDomain": "wxapp.tc.qq.com,vweixinf.tc.qq.com,wx.qlogo.cn",
+        "entitlements": "Entitlements.plist"
       },
       "icon": [
         "icons/32x32.png",

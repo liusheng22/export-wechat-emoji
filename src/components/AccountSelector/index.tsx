@@ -32,6 +32,14 @@ function isRemoteAvatarUrl(value: string | undefined): boolean {
   return /^https?:\/\//i.test(String(value || '').trim())
 }
 
+function selectorDisplayNameOfTarget(target: EmojiTargetMeta): string {
+  const displayName = displayNameOfTarget(target)
+  if (target.kind === 'legacy' && !target.displayName?.trim()) {
+    return `旧版微信: ${displayName}`
+  }
+  return displayName
+}
+
 function avatarMimeFromResult(result: FetchBinaryResult): string | null {
   if (!result.ok) {
     return null
@@ -194,7 +202,7 @@ export const AccountSelector: React.FC<AccountSelectorProps> = ({
                       noWrap
                       sx={{ flexShrink: 0, fontWeight: 700 }}
                     >
-                      {displayNameOfTarget(selectedTarget)}
+                      {selectorDisplayNameOfTarget(selectedTarget)}
                     </Typography>
                     <Typography
                       variant="caption"
@@ -250,7 +258,7 @@ export const AccountSelector: React.FC<AccountSelectorProps> = ({
                           noWrap
                           sx={{ fontWeight: 650 }}
                         >
-                          {displayNameOfTarget(target)}
+                          {selectorDisplayNameOfTarget(target)}
                         </Typography>
                         {target.isCurrentLikelyAccount && (
                           <Typography

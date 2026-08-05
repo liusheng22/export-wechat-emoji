@@ -83,6 +83,9 @@ export function StatusBanner({
           必须先完全退出微信才能继续
         </Typography>
         <Typography variant="caption" sx={{ display: 'block', mt: 0.2 }}>
+          必须先完全退出微信，才能继续获取表情数据。
+        </Typography>
+        <Typography variant="caption" sx={{ display: 'block', mt: 0.2 }}>
           请使用微信菜单退出应用，而不是只关闭窗口。
           {wechatRunningMatches.length > 0 &&
             ` 当前仍检测到 ${wechatRunningMatches.length} 个进程。`}

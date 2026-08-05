@@ -2,6 +2,7 @@ import type { IMaybeUrl } from '../../types'
 import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined'
 import ImageNotSupportedOutlinedIcon from '@mui/icons-material/ImageNotSupportedOutlined'
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined'
+import ZoomInOutlinedIcon from '@mui/icons-material/ZoomInOutlined'
 import { Box, CircularProgress, IconButton, Tooltip } from '@mui/material'
 import React, { useEffect, useRef, useState } from 'react'
 import { PhotoProvider, PhotoView } from 'react-photo-view'
@@ -60,6 +61,8 @@ interface EmojiGridProps {
   previewPage: number
   previewPageSize: number
   copyToClipboard: (value: string, okMessage: string) => void
+  copyEmojiImage?: (src: string, itemKey: string) => void
+  copyingEmojiKeys?: Set<string>
   openSystem: (target: string) => void
   setShowImgList: React.Dispatch<React.SetStateAction<IMaybeUrl[]>>
   emptyTitle?: string
@@ -72,6 +75,8 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
   previewPage,
   previewPageSize,
   copyToClipboard,
+  copyEmojiImage,
+  copyingEmojiKeys = new Set(),
   openSystem,
   setShowImgList,
   emptyTitle = '还没有可预览的表情',
@@ -342,6 +347,8 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
           {currentItems.map((item, index) => {
             const absoluteIndex = pageStart + index + 1
             const previewSrc = getBrowserPreviewSrc(item.src)
+            const itemKey = `${item._text}|${absoluteIndex}`
+            const isCopying = copyingEmojiKeys.has(itemKey)
             const failedKey = `${item.md5 || item._text}|${item.src}`
             const previewFailed = failedPreviews.has(failedKey)
             const previewRecovering = recoveringPreviews.has(failedKey)
@@ -405,13 +412,26 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                   ) : (
                     <PhotoView src={previewSrc}>
                       <Box
+                        component="button"
+                        type="button"
+                        aria-label={`下载并复制表情 ${absoluteIndex}`}
+                        disabled={!copyEmojiImage || isCopying}
+                        onClick={() =>
+                          copyEmojiImage?.(
+                            item.downloadUrl || item.localSourcePath || item._text,
+                            itemKey
+                          )
+                        }
                         sx={{
                           width: '100%',
                           height: '100%',
                           display: 'grid',
                           placeItems: 'center',
                           p: 1.25,
-                          cursor: 'zoom-in'
+                          border: 0,
+                          bgcolor: 'transparent',
+                          cursor: copyEmojiImage ? 'pointer' : 'zoom-in',
+                          '&:disabled': { cursor: 'wait' }
                         }}
                       >
                         <img
@@ -425,6 +445,14 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                             objectFit: 'contain'
                           }}
                         />
+                        {isCopying && (
+                          <CircularProgress
+                            size={22}
+                            thickness={3.5}
+                            sx={{ position: 'absolute' }}
+                            aria-label="正在复制图片"
+                          />
+                        )}
                       </Box>
                     </PhotoView>
                   )}
@@ -441,25 +469,31 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                       transition: 'opacity 120ms ease'
                     }}
                   >
-                    <Tooltip
-                      title={item.downloadUrl ? '复制下载地址' : '复制来源路径'}
-                    >
+                    <PhotoView src={previewSrc}>
                       <IconButton
                         size="small"
-                        aria-label={
-                          item.downloadUrl ? '复制下载地址' : '复制来源路径'
-                        }
+                        aria-label="查看大图"
+                        onClick={(event) => event.stopPropagation()}
+                        sx={{
+                          width: 28,
+                          height: 28,
+                          color: '#FFFFFF',
+                          bgcolor: 'rgba(24, 28, 31, 0.76)',
+                          '&:hover': { bgcolor: 'rgba(24, 28, 31, 0.92)' }
+                        }}
+                      >
+                        <ZoomInOutlinedIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </PhotoView>
+                    <Tooltip title="复制图片地址">
+                      <IconButton
+                        size="small"
+                        aria-label="复制图片地址"
                         onClick={(event) => {
                           event.stopPropagation()
-                          const value =
-                            item.downloadUrl ||
-                            item.localSourcePath ||
-                            item._text
                           copyToClipboard(
-                            value,
-                            item.downloadUrl
-                              ? '下载地址已复制'
-                              : '来源路径已复制'
+                            item.downloadUrl || item.localSourcePath || item._text,
+                            '图片地址已复制'
                           )
                         }}
                         sx={{
@@ -473,14 +507,10 @@ export const EmojiGrid: React.FC<EmojiGridProps> = ({
                         <ContentCopyOutlinedIcon sx={{ fontSize: 15 }} />
                       </IconButton>
                     </Tooltip>
-                    <Tooltip
-                      title={item.downloadUrl ? '打开下载地址' : '打开预览'}
-                    >
+                    <Tooltip title="打开图片链接">
                       <IconButton
                         size="small"
-                        aria-label={
-                          item.downloadUrl ? '打开下载地址' : '打开预览'
-                        }
+                        aria-label="打开图片链接"
                         onClick={(event) => {
                           event.stopPropagation()
                           openSystem(item.downloadUrl || item.src)

@@ -8,28 +8,33 @@ import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined'
 import DownloadIcon from '@mui/icons-material/Download'
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined'
-import SettingsIcon from '@mui/icons-material/Settings'
 import {
   Alert,
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
+  FormControl,
   FormControlLabel,
   IconButton,
+  InputLabel,
   Link,
   LinearProgress,
-  Menu,
+  MenuItem,
   Pagination,
   Paper,
   Radio,
   RadioGroup,
+  Select,
   Snackbar,
   Skeleton,
   Stack,
+  Tab,
+  Tabs,
   Switch,
   TextField,
   Tooltip,
@@ -71,6 +76,12 @@ import {
 import { loadEmojiBinary } from './services/emoji-binary-cache'
 import { copyEmojiFile } from './services/emoji-file-cache'
 import {
+  clearPreviewCache,
+  readPreviewCache,
+  writePreviewCache
+} from './services/preview-cache'
+import { readExportSettings, writeExportSettings } from './services/export-settings'
+import {
   buildGitHubMissingAlbumIssueUrl,
   buildMissingAlbumFeedbackPayload,
   isValidFeedbackContactEmail,
@@ -86,11 +97,6 @@ import {
   writeUrlsFile,
   writeUsageReadme
 } from './services/exporter'
-import {
-  extFromBytes,
-  extFromContentType,
-  extFromUrl
-} from './services/stodownload'
 import {
   buildStickerHubAlbumItems,
   readStickerHubAlbumCache,
@@ -110,6 +116,11 @@ import {
   findEmojiTargetsWithMeta,
   mergeCurrentAccountProfileIntoTargets,
 } from './services/wechat'
+import {
+  restoreWeChatDataBookmark,
+  saveWeChatDataBookmark,
+  type WeChatDataAccessStatus
+} from './services/wechat-data-access'
 
 type FlowStage =
   | 'idle'
@@ -233,6 +244,19 @@ function SettingsRow({
   )
 }
 
+const EMOJI_SORT_ORDER_STORAGE_KEY = 'wxemoticon_emoji_sort_order'
+
+function isEmojiSortOrder(value: unknown): value is EmojiSortOrder {
+  return value === 'newest-first' || value === 'oldest-first'
+}
+
+function orderUrls(
+  urls: Array<string>,
+  sortOrder: EmojiSortOrder
+): Array<string> {
+  return sortOrder === 'newest-first' ? [...urls].reverse() : [...urls]
+}
+
 function App() {
   // wxapp 域名
   const wxappDomain = 'wxapp.tc.qq.com'
@@ -245,12 +269,18 @@ function App() {
   const [selectedTargetValue, setSelectedTargetValue] = useState('')
 
   // 预览/下载数据（来源统一为 URL 列表，但对用户隐藏）
+  const [rawUrls, setRawUrls] = useState<Array<string>>([])
   const [showImgList, setShowImgList] = useState<Array<IMaybeUrl>>([])
   const [copyingEmojiKeys, setCopyingEmojiKeys] = useState<Set<string>>(
     () => new Set()
   )
   const [previewPage, setPreviewPage] = useState(1)
   const previewPageSize = 50
+  const [activeTab, setActiveTab] = useState<AppTab>('preview')
+  const [emojiSortOrder, setEmojiSortOrder] = useState<EmojiSortOrder>(() => {
+    const saved = localStorage.getItem(EMOJI_SORT_ORDER_STORAGE_KEY)
+    return isEmojiSortOrder(saved) ? saved : 'newest-first'
+  })
   const [albums, setAlbums] = useState<EmojiAlbum[]>([])
   const [catalogFavorites, setCatalogFavorites] = useState<Array<string>>([])
   const [catalogMode, setCatalogMode] = useState<EmoticonCatalogMode>('unavailable')
@@ -273,17 +303,32 @@ function App() {
     useState<IncompleteExport | null>(null)
 
   // 导出设置
+  const persistedExportSettings = readExportSettings()
   const [exportGroupMode, setExportGroupMode] = useState<
     'recommended' | 'none' | 'custom'
-  >('recommended')
-  const [exportCustomGroupSize, setExportCustomGroupSize] = useState(50)
-  const [exportResume, setExportResume] = useState(true)
-  const [exportAutoOpen, setExportAutoOpen] = useState(true)
+  >(persistedExportSettings.groupMode)
+  const [exportCustomGroupSize, setExportCustomGroupSize] = useState(
+    persistedExportSettings.customGroupSize
+  )
+  const [exportResume, setExportResume] = useState(persistedExportSettings.resume)
+  const [exportAutoOpen, setExportAutoOpen] = useState(
+    persistedExportSettings.autoOpen
+  )
 
   // download 目录路径（用于 open）
   const [downloadDirPath, setDownloadDirPath] = useState('')
   const [homeDirPath, setHomeDirPath] = useState('')
   const [appDataDirPath, setAppDataDirPath] = useState('')
+  const [lastExportDir, setLastExportDir] = useState<string | null>(null)
+  const [wechatDataAccess, setWechatDataAccess] =
+    useState<WeChatDataAccessStatus | null>(null)
+  const [wechatDataAccessLoading, setWechatDataAccessLoading] = useState(true)
+  const [wechatDataAccessError, setWechatDataAccessError] = useState<
+    string | null
+  >(null)
+  const [restoredCacheNotice, setRestoredCacheNotice] = useState<string | null>(
+    null
+  )
   const [currentView, setCurrentView] = useState<string>('favorites')
 
   // 自动抓取状态（带步骤）
@@ -320,12 +365,13 @@ function App() {
   const activeFlowWxidRef = useRef<string | null>(null)
   const flowActiveRef = useRef(false)
   const albumRequestGenerationRef = useRef(0)
-
-  // Settings Menu
-  const [settingsAnchorEl, setSettingsAnchorEl] = useState<null | HTMLElement>(
-    null
-  )
-  const openSettings = Boolean(settingsAnchorEl)
+  const activeTargetIdRef = useRef('')
+  const activationGenerationRef = useRef(0)
+  const lastActivatedTargetIdRef = useRef('')
+  const activePreviewTaskRef = useRef<{
+    targetId: string
+    generation: number
+  } | null>(null)
 
   const valueOfTarget = (t: EmojiTargetMeta) => encodeEmojiTarget(t)
 
@@ -335,6 +381,14 @@ function App() {
     }
     return targets.find((t) => valueOfTarget(t) === selectedTargetValue) || null
   }, [selectedTargetValue, targets])
+
+  const lastUpdatedText = useMemo(() => {
+    const ms = selectedTargetMeta?.mtimeMs
+    if (!ms) {
+      return ''
+    }
+    return new Date(ms).toLocaleString('zh-CN', { hour12: false })
+  }, [selectedTargetMeta?.mtimeMs])
 
   const isPreviewLoading = previewTaskIntent !== null
 
@@ -642,19 +696,67 @@ function App() {
     localStorage.setItem('wxemoticon_wechat_app_path', wechatAppPath)
   }, [wechatAppPath])
 
+  async function authorizeWeChatDataDirectory() {
+    setWechatDataAccessLoading(true)
+    setWechatDataAccessError(null)
+    try {
+      const home = homeDirPath || (await homeDir())
+      const expectedPath = await join(
+        home,
+        'Library',
+        'Containers',
+        'com.tencent.xinWeChat',
+        'Data'
+      )
+      const selected = await open({
+        title: '授权微信数据目录（请直接点击“打开”）',
+        defaultPath: expectedPath,
+        multiple: false,
+        directory: true
+      })
+      if (typeof selected !== 'string' || !selected) {
+        return
+      }
+
+      const status = await saveWeChatDataBookmark(selected)
+      setWechatDataAccess(status)
+      showToastMessage('微信数据目录授权已保存', 'success')
+      await refreshTargets()
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      setWechatDataAccessError(detail || '保存微信数据目录授权失败')
+      showToastMessage('微信数据目录授权失败', 'warning')
+    } finally {
+      setWechatDataAccessLoading(false)
+    }
+  }
+
   useEffect(() => {
     localStorage.setItem(EMOJI_SORT_ORDER_STORAGE_KEY, emojiSortOrder)
   }, [emojiSortOrder])
 
   useEffect(() => {
-    writeExportSettings(exportSettings)
-  }, [exportSettings])
+    writeExportSettings({
+      version: 1,
+      groupMode: exportGroupMode,
+      customGroupSize: exportCustomGroupSize,
+      resume: exportResume,
+      autoOpen: exportAutoOpen
+    })
+  }, [exportAutoOpen, exportCustomGroupSize, exportGroupMode, exportResume])
 
   useEffect(() => {
     if (!selectedTargetValue) {
       setIncompleteExport(null)
+      setLastExportDir(null)
+      setRestoredCacheNotice(null)
       return
     }
+
+    const savedExportDir = localStorage.getItem(
+      `wxemoticon_last_export_dir|${selectedTargetValue}`
+    )
+    setLastExportDir(savedExportDir || null)
 
     const incompleteRaw = localStorage.getItem(
       `wxemoticon_incomplete_export|${selectedTargetValue}`
@@ -696,6 +798,73 @@ function App() {
       return
     }
 
+    lastActivatedTargetIdRef.current = targetId
+    activeTargetIdRef.current = targetId
+    const generation = activationGenerationRef.current + 1
+    activationGenerationRef.current = generation
+    activePreviewTaskRef.current = null
+    flowActiveRef.current = false
+    activeFlowWxidRef.current = null
+
+    setPreviewTaskIntent(null)
+    setRawUrls([])
+    setShowImgList([])
+    setPreviewPage(1)
+    setAlbums([])
+    setCatalogFavorites([])
+    setCatalogWarnings([])
+    setCatalogMode('unavailable')
+    setCurrentView('favorites')
+    setFlowError(null)
+    setFlowStage('idle')
+    setFlowHint('')
+    setWechatMustQuit(false)
+    setWeChatRunningMatches([])
+    setLastDumpResult(null)
+    setRestoredCacheNotice(null)
+
+    const cache = readPreviewCache(targetId)
+    if (cache) {
+      setRawUrls(cache.urls)
+      setRestoredCacheNotice(`已恢复该账号的本地 URL 缓存（${cache.urls.length} 条）`)
+      if (target.kind === 'v4' && cache.artifacts?.wxid === target.wxidDir) {
+        setLastDumpResult(cache.artifacts)
+      }
+    }
+
+    if (target.kind !== 'v4') {
+      return
+    }
+
+    void hasCachedDbKey(target.wxidDir).then((hasKey) => {
+      if (
+        !hasKey ||
+        activeTargetIdRef.current !== targetId ||
+        activationGenerationRef.current !== generation
+      ) {
+        return
+      }
+      void loadPreview({
+        target,
+        intent: 'auto-refresh',
+        activationGeneration: generation,
+        cachedPreview: Boolean(cache)
+      })
+    })
+    // Account activation owns the cache restore and optional refresh lifecycle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTargetMeta, selectedTargetValue])
+
+  useEffect(() => {
+    const orderedUrls = orderUrls(rawUrls, emojiSortOrder)
+    if (currentView === 'favorites') {
+      setShowImgList(
+        buildEmojiItems(orderedUrls, { wxappDomain, vweixinfDomain })
+      )
+      setPreviewPage(1)
+    }
+  }, [currentView, emojiSortOrder, rawUrls])
+
   useEffect(() => {
     const retryAt = currentStickerHubState.retryAt
     if (!retryAt || retryAt <= Date.now()) {
@@ -733,6 +902,11 @@ function App() {
     if (value) {
       localStorage.setItem('wxemoticon_last_target', value)
     }
+  }
+
+  function handleViewChange(view: string) {
+    setCurrentView(view)
+    setActiveTab(view === 'settings' ? 'advanced' : 'preview')
   }
 
   async function chooseWeChatApp() {
@@ -960,8 +1134,9 @@ function App() {
   }
 
   async function clearCurrentAccountCache() {
-    if (selectedTargetMeta?.kind !== 'v4') {
-      showToastMessage('当前账号没有可清除的缓存', 'info')
+    const target = selectedTargetMeta
+    if (!target) {
+      showToastMessage('请先选择微信账号', 'info')
       return
     }
     const targetId = valueOfTarget(target)
@@ -1072,9 +1247,13 @@ function App() {
     setCatalogFavorites([])
     setCatalogWarnings([])
     setCatalogMode('unavailable')
-    setShowImgList([])
+    if (!hadPreview) {
+      setShowImgList([])
+    }
     setPreviewPage(1)
-    setLastDumpResult(null)
+    if (!hadPreview) {
+      setLastDumpResult(null)
+    }
 
     try {
       if (target.kind === 'legacy') {
@@ -1092,13 +1271,18 @@ function App() {
         setCatalogWarnings([])
         setCatalogMode('favorites_only')
         setCurrentView('favorites')
-        setShowImgList(buildEmojiItems(urls, { wxappDomain, vweixinfDomain }))
+        writePreviewCache(targetId, urls)
+        setRestoredCacheNotice(`已恢复该账号的本地 URL 缓存（${urls.length} 条）`)
+        setRawUrls(urls)
+        setShowImgList(
+          buildEmojiItems(orderUrls(urls, emojiSortOrder), {
+            wxappDomain,
+            vweixinfDomain
+          })
+        )
         setFlowStage('ready')
         setFlowHint('')
-      } catch {
-        setFlowError('读取个人收藏失败。请确认微信数据完整后重试。')
-        setFlowStage('error')
-        setFlowHint('')
+        return
       }
 
       // If a key already exists, refresh offline without forcing WeChat to quit.
@@ -1118,21 +1302,9 @@ function App() {
           setWeChatRunningMatches(check.matches || [])
           setFlowStage('idle')
           setFlowHint('')
-          showToastMessage(
-            '必须先完全退出微信，才能继续获取表情数据。',
-            'warning'
-          )
           return
         }
-      } catch {
-        const friendly = '无法确认微信状态。请完全退出微信后重试。'
-        setFlowError(friendly)
-        setFlowStage('error')
-        setFlowHint('')
-        showToastMessage(friendly, 'error')
-        return
       }
-
       // The existing v4 pipeline uses this path when it needs to obtain a key.
       const ok = await fsExists(wechatAppPath)
       if (!belongsToActiveTarget()) {
@@ -1155,18 +1327,28 @@ function App() {
     )
     flowActiveRef.current = true
     activeFlowWxidRef.current = target.wxidDir
-    try {
-      const result = await autoDumpEmoticonUrlsV4(target.wxidDir, wechatAppPath)
-      setLastDumpResult(result)
-      const catalog = await buildEmoticonCatalogV4(target.wxidDir, result.dbKey)
-      const favorites = catalog.favorites || []
+    const result = await autoDumpEmoticonUrlsV4(
+      target.wxidDir,
+      wechatAppPath,
+      intent !== 'auto-refresh'
+    )
+    if (!belongsToActiveTarget()) {
+      return
+    }
+    setLastDumpResult(result)
+    const urls = result.urls || []
+    const catalog = await buildEmoticonCatalogV4(target.wxidDir, result.dbKey)
+      const favorites = catalog.favorites?.length ? catalog.favorites : urls
       const nextAlbums = catalog.albums || []
       const nextMode = catalog.mode || 'unavailable'
       const nextWarnings = catalog.warnings || []
-      const favoritePreviewItems = buildEmojiItems(favorites, {
-        wxappDomain,
-        vweixinfDomain
-      })
+      const favoritePreviewItems = buildEmojiItems(
+        orderUrls(favorites, emojiSortOrder),
+        {
+          wxappDomain,
+          vweixinfDomain
+        }
+      )
       const previewItems = favoritePreviewItems
 
       if (!previewItems.length && !nextAlbums.length && !favorites.length) {
@@ -1182,6 +1364,11 @@ function App() {
       setCurrentView('favorites')
       setShowImgList(previewItems)
       setPreviewPage(1)
+      if (urls.length) {
+        writePreviewCache(targetId, urls, result)
+        setRestoredCacheNotice(`已恢复该账号的本地 URL 缓存（${urls.length} 条）`)
+        setRawUrls(urls)
+      }
       setFlowStage('ready')
       setFlowHint('')
       flowActiveRef.current = false
@@ -1207,10 +1394,6 @@ function App() {
         setFlowError(null)
         setFlowStage('idle')
         setFlowHint('')
-        showToastMessage(
-          '必须先完全退出微信，才能继续获取表情数据。',
-          'warning'
-        )
         return
       }
       const friendly = textMsg.includes('timed out waiting for db key')
@@ -1250,11 +1433,15 @@ function App() {
       return
     }
 
+    const urls = catalogFavorites.length ? catalogFavorites : rawUrls
     setShowImgList(
-      buildEmojiItems(catalogFavorites, { wxappDomain, vweixinfDomain })
+      buildEmojiItems(orderUrls(urls, emojiSortOrder), {
+        wxappDomain,
+        vweixinfDomain
+      })
     )
     setPreviewPage(1)
-  }, [catalogFavorites, currentView])
+  }, [catalogFavorites, currentView, emojiSortOrder, rawUrls])
 
   useEffect(() => {
     if (!currentView.startsWith('album|')) {
@@ -1430,7 +1617,10 @@ function App() {
     cancelExportRef.current = false
     createdSubDirsRef.current = new Set()
 
-    const items = showImgList
+    const items =
+      currentView === 'favorites' && options.sortOrder !== emojiSortOrder
+        ? [...showImgList].reverse()
+        : showImgList
     const fileKeys = buildUniqueFileKeys(
       items.map((i, index) => i.downloadUrl || i._text || String(index + 1))
     )
@@ -1561,6 +1751,13 @@ function App() {
       groupSize: options.groupSize
     }
     setExportResult(result)
+    setLastExportDir(options.dirName)
+    if (selectedTargetValue && !canceled) {
+      localStorage.setItem(
+        `wxemoticon_last_export_dir|${selectedTargetValue}`,
+        options.dirName
+      )
+    }
 
     if (selectedTargetValue) {
       if (!canceled) {
@@ -1658,13 +1855,17 @@ function App() {
         targetsLoading={targetsLoading}
         isExporting={isExporting}
         currentView={currentView}
-        onViewChange={setCurrentView}
+        onViewChange={handleViewChange}
         albums={albums}
         favoritesCount={catalogFavorites.length}
         catalogMode={catalogMode}
       />
 
       <Box component="main" className="main-content" sx={{ position: 'relative' }}>
+        <Paper
+          variant="outlined"
+          sx={{ height: '100%', borderRadius: 0, overflow: 'hidden' }}
+        >
         <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
           <Box
             component="header"
@@ -1699,8 +1900,9 @@ function App() {
                   {currentViewSubtitle}
                 </Typography>
               </Box>
-              {(currentView === 'favorites' ||
-                currentView.startsWith('album|')) && (
+              {activeTab === 'preview' &&
+                (currentView === 'favorites' ||
+                  currentView.startsWith('album|')) && (
                 <Stack
                   direction="row"
                   spacing={0.75}
@@ -1712,11 +1914,15 @@ function App() {
                       <Button
                         aria-label="获取并预览"
                         variant={showImgList.length ? 'outlined' : 'contained'}
-                        onClick={loadPreview}
-                        disabled={targetsLoading || !selectedTargetValue}
+                        onClick={() => void loadPreview()}
+                        disabled={
+                          targetsLoading ||
+                          !selectedTargetValue ||
+                          isPreviewLoading
+                        }
                         size="small"
                       >
-                        {showImgList.length ? '重新读取' : '读取表情'}
+                        {isPreviewLoading ? '读取中…' : '刷新预览'}
                       </Button>
 
                       {showImgList.length > 0 && (
@@ -1738,16 +1944,6 @@ function App() {
                               继续上次
                             </Button>
                           )}
-                          <Tooltip title="导出设置">
-                            <IconButton
-                              aria-label="导出设置"
-                              onClick={(event) =>
-                                setSettingsAnchorEl(event.currentTarget)
-                              }
-                            >
-                              <SettingsIcon sx={{ fontSize: 18 }} />
-                            </IconButton>
-                          </Tooltip>
                         </>
                       )}
                     </>
@@ -1781,18 +1977,64 @@ function App() {
               </Alert>
             )}
 
+            {!wechatDataAccess && !wechatDataAccessLoading && !targetsError && (
+              <Alert
+                severity="info"
+                sx={{ mb: 2 }}
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => setActiveTab('advanced')}
+                  >
+                    去授权
+                  </Button>
+                }
+              >
+                macOS 首次读取微信数据可能需要授权。授权一次后，应用会记住访问范围，减少重复提示。
+              </Alert>
+            )}
+
             <StatusBanner
               flowStage={flowStage}
               flowHint={flowHint}
               flowError={flowError}
               wechatMustQuit={wechatMustQuit}
               wechatRunningMatches={wechatRunningMatches}
-              onRetry={loadPreview}
+              onRetry={() => void loadPreview()}
               onOpenLogDir={openLogDir}
               isV4={selectedTargetMeta?.kind === 'v4'}
             />
 
-            {catalogNotice && currentView === 'favorites' && (
+            <Tabs
+              value={activeTab}
+              onChange={(_event, value: AppTab) => setActiveTab(value)}
+              aria-label="功能导航"
+              variant="fullWidth"
+              sx={{ mb: 2 }}
+            >
+              <Tab
+                value="preview"
+                label={
+                  <Stack direction="row" spacing={0.75} alignItems="center">
+                    <span>表情预览</span>
+                    {isPreviewLoading && <CircularProgress size={14} />}
+                  </Stack>
+                }
+              />
+              <Tab
+                value="export"
+                label={
+                  <Stack direction="row" spacing={0.75} alignItems="center">
+                    <span>导出</span>
+                    {isExporting && <CircularProgress size={14} />}
+                  </Stack>
+                }
+              />
+              <Tab value="advanced" label="高级设置" />
+            </Tabs>
+
+            {activeTab === 'preview' && catalogNotice && currentView === 'favorites' && (
                 <Alert
                   severity={catalogNotice.severity}
                   variant="outlined"
@@ -1802,7 +2044,57 @@ function App() {
                 </Alert>
               )}
 
-            {currentView === 'favorites' || currentView.startsWith('album|') ? (
+            {activeTab === 'preview' && (
+              <>
+                <Stack spacing={1.25} sx={{ mb: 2 }}>
+                  {flowError && (
+                    <Alert
+                      severity="error"
+                      action={
+                        selectedTargetMeta?.kind === 'v4' ? (
+                          <Button color="inherit" size="small" onClick={openLogDir}>
+                            打开日志目录
+                          </Button>
+                        ) : undefined
+                      }
+                    >
+                      {flowError}
+                    </Alert>
+                  )}
+                  <Stack direction="row" spacing={1.25} flexWrap="wrap">
+                    <Button
+                      size="large"
+                      variant="contained"
+                      onClick={() => void loadPreview()}
+                      disabled={
+                        isExporting ||
+                        isPreviewLoading ||
+                        targetsLoading ||
+                        !selectedTargetValue
+                      }
+                    >
+                      {previewTaskIntent
+                        ? previewTaskIntent === 'initial'
+                          ? '正在获取…'
+                          : '正在重新获取…'
+                        : '一键获取并预览'}
+                    </Button>
+                  </Stack>
+                  {previewTaskIntent === 'initial' &&
+                    (flowStage === 'checkingWechat' ||
+                      flowStage === 'preparingWeChatCopy' ||
+                      flowStage === 'waitingForKey' ||
+                      flowStage === 'offlineParsing') && (
+                    <Box>
+                      <Typography variant="body2" sx={{ mb: 0.75 }}>
+                        {flowHint || '正在处理，请稍候…'}
+                      </Typography>
+                      <LinearProgress />
+                    </Box>
+                  )}
+                </Stack>
+
+                {currentView === 'favorites' || currentView.startsWith('album|') ? (
               <>
                 {currentView.startsWith('album|') &&
                   currentStickerHubState.status === 'loading' && (
@@ -1911,6 +2203,8 @@ function App() {
                     previewPage={previewPage}
                     previewPageSize={previewPageSize}
                     copyToClipboard={copyToClipboard}
+                    copyEmojiImage={copyEmojiImage}
+                    copyingEmojiKeys={copyingEmojiKeys}
                     openSystem={openSystem}
                     setShowImgList={setShowImgList}
                     emptyTitle={
@@ -1981,9 +2275,208 @@ function App() {
                   />
                 )}
               </>
-            ) : currentView === 'settings' ? (
+            ) : null}
+              </>
+            )}
+
+            {activeTab === 'export' && (
+              <Stack spacing={2} sx={{ maxWidth: 720 }}>
+                {!rawUrls.length ? (
+                  <Alert
+                    severity="info"
+                    action={
+                      <Button
+                        color="inherit"
+                        size="small"
+                        onClick={() => setActiveTab('preview')}
+                      >
+                        去获取
+                      </Button>
+                    }
+                  >
+                    请先在“表情预览”中获取表情。
+                  </Alert>
+                ) : (
+                  <>
+                    <Stack direction="row" spacing={1.25} flexWrap="wrap">
+                      <Button
+                        size="large"
+                        variant="contained"
+                        onClick={startNewExport}
+                        disabled={isExporting || cancelRequested}
+                      >
+                        开始导出
+                      </Button>
+                      {incompleteExport && (
+                        <Button
+                          size="large"
+                          variant="outlined"
+                          onClick={continueLastExport}
+                          disabled={isExporting || cancelRequested}
+                        >
+                          继续上次导出（断点续跑）
+                        </Button>
+                      )}
+                      <Button
+                        color="warning"
+                        size="large"
+                        variant="outlined"
+                        onClick={cancelExport}
+                        disabled={!isExporting || cancelRequested}
+                      >
+                        {cancelRequested ? '正在取消…' : '取消导出'}
+                      </Button>
+                    </Stack>
+
+                    <Typography variant="body1" sx={{ fontWeight: 700 }}>
+                      导出设置
+                    </Typography>
+                    <FormControl component="fieldset">
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                        导出分组
+                      </Typography>
+                      <RadioGroup
+                        value={exportGroupMode}
+                        onChange={(event) =>
+                          setExportGroupMode(
+                            event.target.value as 'recommended' | 'none' | 'custom'
+                          )
+                        }
+                      >
+                        <FormControlLabel
+                          value="recommended"
+                          control={<Radio disabled={isExporting} />}
+                          label="每 50 张分组（默认/推荐）"
+                          disabled={isExporting}
+                        />
+                        <FormControlLabel
+                          value="none"
+                          control={<Radio disabled={isExporting} />}
+                          label="不分组（全部放在一个目录）"
+                          disabled={isExporting}
+                        />
+                        <FormControlLabel
+                          value="custom"
+                          control={<Radio disabled={isExporting} />}
+                          label="自定义分组大小"
+                          disabled={isExporting}
+                        />
+                      </RadioGroup>
+                    </FormControl>
+                    {exportGroupMode === 'custom' && (
+                      <TextField
+                        type="number"
+                        size="small"
+                        label="自定义分组大小"
+                        value={exportCustomGroupSize}
+                        onChange={(event) =>
+                          setExportCustomGroupSize(
+                            Math.max(1, Math.floor(Number(event.target.value) || 1))
+                          )
+                        }
+                        disabled={isExporting}
+                        inputProps={{ min: 1 }}
+                      />
+                    )}
+                    <Stack direction="row" spacing={2} flexWrap="wrap">
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={exportResume}
+                            onChange={(event) => setExportResume(event.target.checked)}
+                            disabled={isExporting}
+                          />
+                        }
+                        label="断点续跑（跳过已存在文件）"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={exportAutoOpen}
+                            onChange={(event) => setExportAutoOpen(event.target.checked)}
+                            disabled={isExporting}
+                          />
+                        }
+                        label="导出完成后自动打开目录"
+                      />
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary">
+                      导出目录固定在「下载」目录下；每次导出都会创建一个新文件夹。
+                    </Typography>
+                    {(isExporting || exportProgress > 0) && (
+                      <Box>
+                        <Typography variant="body2" sx={{ mb: 0.75 }}>
+                          导出进度：{exportProgress}/{showImgList.length}（成功：
+                          {exportOk}，跳过：{exportSkipped}，失败：{exportFailed}）
+                        </Typography>
+                        <LinearProgress
+                          variant="determinate"
+                          value={
+                            showImgList.length
+                              ? (exportProgress / showImgList.length) * 100
+                              : 0
+                          }
+                        />
+                      </Box>
+                    )}
+                    {lastExportDir && (
+                      <Stack direction="row" spacing={1.25} alignItems="center">
+                        <Typography variant="body2" color="text.secondary">
+                          上次导出：{lastExportDir}
+                        </Typography>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() =>
+                            openExportDir(downloadDirPath, lastExportDir).catch(() => {})
+                          }
+                        >
+                          打开
+                        </Button>
+                      </Stack>
+                    )}
+                  </>
+                )}
+              </Stack>
+            )}
+
+            {activeTab === 'advanced' && (
               <Box sx={{ maxWidth: 720 }}>
                 <Stack spacing={3}>
+                  <SettingsGroup title="显示与读取">
+                    <SettingsRow
+                      title="表情排序方式"
+                      description="影响预览顺序和导出顺序"
+                      action={
+                        <FormControl size="small" sx={{ minWidth: 180 }}>
+                          <InputLabel id="emoji-sort-order-label">表情排序</InputLabel>
+                          <Select
+                            labelId="emoji-sort-order-label"
+                            label="表情排序"
+                            value={emojiSortOrder}
+                            onChange={(event) =>
+                              setEmojiSortOrder(event.target.value as EmojiSortOrder)
+                            }
+                            disabled={isExporting}
+                          >
+                            <MenuItem value="newest-first">最新添加在前</MenuItem>
+                            <MenuItem value="oldest-first">最早添加在前</MenuItem>
+                          </Select>
+                        </FormControl>
+                      }
+                    />
+                    {restoredCacheNotice && (
+                      <>
+                        <Divider />
+                        <Box sx={{ px: 2, py: 1.25 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            {restoredCacheNotice}
+                          </Typography>
+                        </Box>
+                      </>
+                    )}
+                  </SettingsGroup>
+
                   {selectedTargetMeta ? (
                     <SettingsGroup title="当前账号">
                       <SettingsRow
@@ -2005,19 +2498,38 @@ function App() {
                                 : '读取表情后生成'
                             }
                             action={
-                              <Button
-                                variant="outlined"
-                                size="small"
-                                disabled={!lastDumpResult?.dbKey}
-                                onClick={() =>
-                                  copyToClipboard(
-                                    lastDumpResult?.dbKey || '',
-                                    '账号密钥已复制'
-                                  )
-                                }
-                              >
-                                复制
-                              </Button>
+                              <Stack direction="row" spacing={0.5}>
+                                <Tooltip title="复制 db key">
+                                  <span>
+                                    <IconButton
+                                      aria-label="复制"
+                                      size="small"
+                                      disabled={!lastDumpResult?.dbKey}
+                                      onClick={() =>
+                                        copyToClipboard(
+                                          lastDumpResult?.dbKey || '',
+                                          '账号密钥已复制'
+                                        )
+                                      }
+                                    >
+                                      <ContentCopyOutlinedIcon fontSize="small" />
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                                <Button
+                                  variant="outlined"
+                                  size="small"
+                                  disabled={!lastDumpResult?.dbKey}
+                                  onClick={() =>
+                                    copyToClipboard(
+                                      lastDumpResult?.dbKey || '',
+                                      '账号密钥已复制'
+                                    )
+                                  }
+                                >
+                                  复制 db key
+                                </Button>
+                              </Stack>
                             }
                           />
                         </>
@@ -2031,7 +2543,7 @@ function App() {
                             {selectedTargetMeta.kind === 'v4' && (
                               <Button
                                 variant="outlined"
-                                onClick={openLogDir}
+                                onClick={() => void openLogDir()}
                                 size="small"
                               >
                                 诊断信息
@@ -2056,7 +2568,7 @@ function App() {
                     </Alert>
                   )}
 
-                  <SettingsGroup title="微信应用">
+                  <SettingsGroup title="微信应用与访问权限">
                     <Box
                       sx={{
                         px: 2,
@@ -2069,12 +2581,10 @@ function App() {
                       <TextField
                         fullWidth
                         size="small"
-                        label="安装位置"
+                        label="微信应用位置"
                         helperText="通常无需修改；仅在应用无法找到微信时重新选择"
                         value={wechatAppPath}
-                        onChange={(event) =>
-                          setWechatAppPath(event.target.value)
-                        }
+                        onChange={(event) => setWechatAppPath(event.target.value)}
                         disabled={isExporting}
                       />
                       <Button
@@ -2086,7 +2596,43 @@ function App() {
                         选择
                       </Button>
                     </Box>
+                    <Divider />
+                    <SettingsRow
+                      title={
+                        wechatDataAccess ? '已保存目录授权' : '微信数据目录授权'
+                      }
+                      description={
+                        wechatDataAccess
+                          ? '已保存目录授权，启动时会自动恢复访问范围'
+                          : '授权一次后减少 macOS 重复提示'
+                      }
+                      action={
+                        <Button
+                          variant="outlined"
+                          onClick={authorizeWeChatDataDirectory}
+                          disabled={
+                            wechatDataAccessLoading ||
+                            isExporting ||
+                            isPreviewLoading ||
+                            targetsLoading
+                          }
+                          size="small"
+                        >
+                          {wechatDataAccessLoading
+                            ? '正在处理…'
+                            : wechatDataAccess
+                              ? '重新授权微信数据目录'
+                              : '授权微信数据目录'}
+                        </Button>
+                      }
+                    />
+                    {wechatDataAccessError && (
+                      <Box sx={{ px: 2, pb: 1.5 }}>
+                        <Alert severity="warning">{wechatDataAccessError}</Alert>
+                      </Box>
+                    )}
                   </SettingsGroup>
+
                   <SettingsGroup title="关于">
                     <SettingsRow
                       title="导出微信表情包"
@@ -2139,11 +2685,9 @@ function App() {
                       }
                     />
                     <Divider />
-                    <SettingsRow
-                      title="开发者"
-                      description={DEVELOPER_EMAIL}
-                    />
+                    <SettingsRow title="开发者" description={DEVELOPER_EMAIL} />
                   </SettingsGroup>
+
                   <SettingsGroup title="数据与隐私">
                     <SettingsRow
                       title="本地处理"
@@ -2177,6 +2721,7 @@ function App() {
                       }
                     />
                   </SettingsGroup>
+
                   <SettingsGroup title="兼容性">
                     <SettingsRow
                       title="微信 4.x"
@@ -2190,7 +2735,7 @@ function App() {
                   </SettingsGroup>
                 </Stack>
               </Box>
-            ) : null}
+            )}
           </Box>
         </Box>
 
@@ -2233,101 +2778,8 @@ function App() {
             />
           </Box>
         )}
+      </Paper>
       </Box>
-
-      {/* Export Settings Menu */}
-      <Menu
-        anchorEl={settingsAnchorEl}
-        open={openSettings}
-        onClose={() => setSettingsAnchorEl(null)}
-        PaperProps={{
-          sx: {
-            width: 292,
-            mt: 0.75,
-            border: '1px solid',
-            borderColor: 'divider',
-            boxShadow: '0 10px 28px rgba(23, 25, 28, 0.14)'
-          }
-        }}
-        transformOrigin={{ horizontal: 'right', vertical: 'top' }}
-        anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
-      >
-        <Box sx={{ px: 2, py: 1.5 }}>
-          <Typography variant="subtitle2" sx={{ mb: 1.25, fontWeight: 700 }}>
-            导出设置
-          </Typography>
-
-          <Typography
-            variant="caption"
-            sx={{
-              color: 'text.secondary',
-              fontWeight: 600,
-              display: 'block',
-              mb: 1
-            }}
-          >
-            分组方式
-          </Typography>
-          <RadioGroup
-            value={exportGroupMode}
-            onChange={(e) => setExportGroupMode(e.target.value as any)}
-            sx={{ mb: 2 }}
-          >
-            <FormControlLabel
-              value="recommended"
-              control={<Radio size="small" />}
-              label={<Typography variant="body2">每 50 个分为一组</Typography>}
-            />
-            <FormControlLabel
-              value="none"
-              control={<Radio size="small" />}
-              label={<Typography variant="body2">不分组</Typography>}
-            />
-            <FormControlLabel
-              value="custom"
-              control={<Radio size="small" />}
-              label={<Typography variant="body2">自定义分组</Typography>}
-            />
-          </RadioGroup>
-
-          {exportGroupMode === 'custom' && (
-            <TextField
-              fullWidth
-              size="small"
-              type="number"
-              label="每组数量"
-              value={exportCustomGroupSize}
-              onChange={(e) => setExportCustomGroupSize(Number(e.target.value))}
-              sx={{ mb: 2 }}
-            />
-          )}
-
-          <Divider sx={{ my: 1.5 }} />
-
-          <FormControlLabel
-            control={
-              <Switch
-                size="small"
-                checked={exportResume}
-                onChange={(e) => setExportResume(e.target.checked)}
-              />
-            }
-            label={<Typography variant="body2">断点续跑</Typography>}
-            sx={{ mb: 0.5, display: 'flex' }}
-          />
-          <FormControlLabel
-            control={
-              <Switch
-                size="small"
-                checked={exportAutoOpen}
-                onChange={(e) => setExportAutoOpen(e.target.checked)}
-              />
-            }
-            label={<Typography variant="body2">完成后打开文件夹</Typography>}
-            sx={{ display: 'flex' }}
-          />
-        </Box>
-      </Menu>
 
       {/* Dialogs and Snackbars */}
       <Dialog
@@ -2552,6 +3004,44 @@ function App() {
             disabled={emailFeedbackSending}
           >
             {emailFeedbackSending ? '发送中…' : '发送反馈'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={resumeSortConflictOpen}
+        onClose={() => setResumeSortConflictOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>排序方式与上次导出不同</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            上次未完成的导出使用“{incompleteExport?.sortOrder === 'oldest-first' ? '最早添加在前' : '最新添加在前'}”，当前设置为“{emojiSortOrder === 'oldest-first' ? '最早添加在前' : '最新添加在前'}”。
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            继续上次导出会保持原顺序；按当前顺序开始则会创建新的导出目录。
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setResumeSortConflictOpen(false)}>取消</Button>
+          <Button
+            variant="outlined"
+            onClick={() => {
+              setResumeSortConflictOpen(false)
+              void continueExportWithRecordedOrder()
+            }}
+          >
+            按上次排序继续
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              setResumeSortConflictOpen(false)
+              void startNewExport()
+            }}
+          >
+            按当前排序开始新的导出
           </Button>
         </DialogActions>
       </Dialog>

@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => {
     async () => '/Users/tester/Library/Application Support/me.lius.wxemoticon'
   ),
   commandExecuteMock: vi.fn(async () => ({})),
+  invokeMock: vi.fn(async () => false),
   emailFeedbackPostMock,
   getClientMock: vi.fn(async () => ({
     get: vi.fn(),
@@ -75,6 +76,8 @@ const mocks = vi.hoisted(() => {
   readCurrentWeChatAccountProfileMock: vi.fn(async () => null),
   readStickerHubAlbumCacheMock: vi.fn(),
   refreshStickerHubAlbumMock: vi.fn(),
+  restoreWeChatDataBookmarkMock: vi.fn(async () => null),
+  saveWeChatDataBookmarkMock: vi.fn(),
   createObjectUrlMock: vi.fn(() => 'blob:stickerhub-preview'),
   revokeObjectUrlMock: vi.fn()
   }
@@ -246,6 +249,17 @@ function makeV4Target(wxid = 'wxid_test_123'): V4Target {
   }
 }
 
+function makeLegacyTarget(): LegacyTarget {
+  return {
+    kind: 'legacy',
+    versionDir: '2.0b4.0.9',
+    userDir: '0123456789abcdef0123456789abcdef',
+    favArchivePath:
+      'Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9/0123456789abcdef0123456789abcdef/Stickers/fav.archive',
+    mtimeMs: 1_700_000_000_000
+  }
+}
+
 function makeFavoritesCatalog(urls: string[]) {
   return {
     mode: 'favorites_only' as const,
@@ -294,6 +308,7 @@ async function expectPreviewImages(count: number) {
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  clearEmojiBinaryCacheForTests()
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
     value: mocks.createObjectUrlMock
@@ -304,6 +319,7 @@ beforeEach(() => {
   })
 
   mocks.findEmojiTargetsWithMetaMock.mockResolvedValue([])
+  mocks.invokeMock.mockResolvedValue(false)
   mocks.restoreWeChatDataBookmarkMock.mockResolvedValue(null)
   mocks.saveWeChatDataBookmarkMock.mockResolvedValue({
     path: '/Users/tester/Library/Containers/com.tencent.xinWeChat/Data',
@@ -332,6 +348,7 @@ beforeEach(() => {
     payload: null,
     retryAfterSeconds: null
   })
+  mocks.fetchBinaryWithFallbackMock.mockReset()
   mocks.fetchBinaryWithFallbackMock.mockResolvedValue({
     ok: true,
     buffer: new Uint8Array([71, 73, 70, 56]).buffer,
@@ -746,7 +763,7 @@ describe('App GUI flow', () => {
     )
     setExistsBehavior({ wechatApp: true, cachedKey: true })
 
-    await renderApp()
+    const { user } = await renderApp()
 
     await waitForPreviewActionEnabled()
     expect(screen.getByRole('combobox')).toHaveTextContent('wxid_test_123')
@@ -1376,7 +1393,7 @@ describe('App GUI flow', () => {
 
     const { user } = await renderApp()
     expect(
-      await screen.findByDisplayValue(/旧版微信: 0123456789abcdef/)
+      await screen.findByText(/旧版微信: 0123456789abcdef/)
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '一键获取并预览' }))
     expect(screen.getByRole('button', { name: '正在获取…' })).toBeDisabled()

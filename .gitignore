@@ -11,7 +11,9 @@ node_modules
 dist
 dist-ssr
 README
-docs
+docs/*
+!docs/specs/
+!docs/specs/**
 _docs
 .tmp
 *.local

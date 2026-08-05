@@ -4,6 +4,8 @@
 #![allow(unexpected_cfgs)]
 
 mod stickerhub;
+mod emoji_file_cache;
+mod wechat_data_bookmark;
 
 use aes::{Aes128, Aes256};
 use aes::cipher::{BlockEncrypt, KeyInit};
@@ -24,6 +26,19 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 use tauri::Manager;
 use reqwest::blocking::Client;
+use tempfile::NamedTempFile;
+use emoji_file_cache::{
+    __cmd__cache_and_copy_emoji_file,
+    __cmd__copy_cached_emoji_file,
+    cache_and_copy_emoji_file,
+    copy_cached_emoji_file,
+};
+use wechat_data_bookmark::{
+    __cmd__restore_wechat_data_bookmark,
+    __cmd__save_wechat_data_bookmark,
+    restore_wechat_data_bookmark,
+    save_wechat_data_bookmark,
+};
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]

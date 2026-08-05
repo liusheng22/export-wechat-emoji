@@ -51,8 +51,8 @@ jobs:
       - name: build key dumper dylib (for app auto-dump)
         run: bash tools/wechat-key-dumper/build.sh
 
-      - name: build extract-emoticon-urls helper binary (for tauri bundler)
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release --target ${{ matrix.tauri_target }} --bin extract-emoticon-urls --features dev-tools
+      - name: build helper binaries (for tauri bundler)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --target ${{ matrix.tauri_target }} --bins --features dev-tools
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile

@@ -330,16 +330,6 @@ fn detect_embedded_image_slice(data: &[u8]) -> Option<(usize, usize, &'static st
     best
 }
 
-fn normalize_file_uri_path(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let encoded = text.replace('#', "%23").replace(' ', "%20");
-    if encoded.starts_with('/') {
-        format!("file://{encoded}")
-    } else {
-        format!("file:///{encoded}")
-    }
-}
-
 fn resolve_preview_cache_dir() -> anyhow::Result<PathBuf> {
     let home_dir = std::env::var_os("HOME")
         .map(PathBuf::from)

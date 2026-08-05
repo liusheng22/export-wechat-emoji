@@ -457,7 +457,6 @@ fn extract_emoticon_urls_v4(
 
 #[derive(Clone, Debug)]
 struct EmoticonUrlRow {
-    md5: String,
     url: String,
 }
 
@@ -655,10 +654,7 @@ fn collect_favorite_url_rows_from_conn(conn: &Connection) -> Result<Vec<Emoticon
                 encrypt_url,
             ]) {
                 seen_md5.insert(normalized_md5.clone());
-                urls.push(EmoticonUrlRow {
-                    md5: normalized_md5,
-                    url,
-                });
+                urls.push(EmoticonUrlRow { url });
             }
         }
 
@@ -700,10 +696,7 @@ fn collect_favorite_url_rows_from_conn(conn: &Connection) -> Result<Vec<Emoticon
                 encrypt_url,
             ]) {
                 seen_md5.insert(normalized_md5.clone());
-                urls.push(EmoticonUrlRow {
-                    md5: normalized_md5,
-                    url,
-                });
+                urls.push(EmoticonUrlRow { url });
             }
         }
     }
@@ -1434,43 +1427,6 @@ fn resolve_matching_legacy_sticker_root(
         second_best_overlap,
         strong_match,
     }))
-}
-
-#[cfg(target_os = "macos")]
-fn collect_local_package_ids_from_sticker_root(sticker_root: &Path) -> Vec<String> {
-    let thumbs_dir = sticker_root.join("Thumbs");
-    let entries = match std::fs::read_dir(thumbs_dir) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
-    let mut package_ids = HashSet::<String>::new();
-    for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.ends_with(".thumb") {
-            continue;
-        }
-        let package_id = name.trim_end_matches(".thumb").trim();
-        if package_id
-            .to_ascii_lowercase()
-            .starts_with("com.tencent.xin.emoticon.")
-        {
-            package_ids.insert(package_id.to_string());
-        }
-    }
-
-    let mut out: Vec<String> = package_ids.into_iter().collect();
-    out.sort();
-    out
 }
 
 #[tauri::command]

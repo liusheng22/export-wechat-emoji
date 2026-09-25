@@ -24,6 +24,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 use tempfile::NamedTempFile;
 use tokio::time::Instant;
@@ -31,12 +33,19 @@ use url::Url;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod keyscan;
 
 #[cfg(target_os = "macos")]
 const DEFAULT_WECHAT_PATH: &str = "/Applications/WeChat.app";
 #[cfg(target_os = "linux")]
 const DEFAULT_WECHAT_PATH: &str = "/opt/wechat/wechat";
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+// Windows 下留空表示自动检测 Weixin.exe / WeChat.exe。
+#[cfg(target_os = "windows")]
+const DEFAULT_WECHAT_PATH: &str = "";
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const DEFAULT_WECHAT_PATH: &str = "wechat";
 
 // The key dumper dylib is built by build.rs and embedded here so the CLI stays a single executable.
@@ -48,10 +57,10 @@ static WECHAT_KEY_DUMPER_DYLIB: &[u8] = include_bytes!(env!("WXEMOTICON_KEY_DUMP
     name = "wxemoticon",
     author,
     version,
-    about = "macOS/Linux 微信表情包工具：抓取 db key / 导出 URL / 导出表情包图片"
+    about = "微信表情包工具（macOS/Linux/Windows）：抓取 db key / 导出 URL / 导出表情包图片"
 )]
 struct Cli {
-    /// 微信程序路径（Linux 默认 /opt/wechat/wechat；macOS 默认 /Applications/WeChat.app）
+    /// 微信程序路径（Windows 默认自动检测 Weixin.exe；Linux 默认 /opt/wechat/wechat；macOS 默认 /Applications/WeChat.app）
     #[arg(
         long = "wechat-bin",
         visible_alias = "wechat-app",
@@ -60,7 +69,8 @@ struct Cli {
     )]
     wechat_app: String,
 
-    /// xwechat_files 数据目录；Linux 会自动检测 ~/Documents 和 ~/文档
+    /// xwechat_files 数据目录；未指定时按平台自动检测
+    /// （macOS 微信容器，Linux ~/Documents 与 ~/文档，Windows %USERPROFILE%\xwechat_files）
     #[arg(long, global = true)]
     wechat_data_dir: Option<String>,
 
@@ -93,7 +103,7 @@ struct KeyArgs {
     #[arg(long)]
     wxid: Option<String>,
 
-    /// 输出 key 文件路径（默认写到微信容器 Documents/export-wechat-emoji）
+    /// 输出 key 文件路径（默认写入各平台缓存目录）
     #[arg(long)]
     out: Option<String>,
 
@@ -109,7 +119,7 @@ struct KeyArgs {
     #[arg(long, default_value_t = 600)]
     timeout: u64,
 
-    /// 在 Finder 中打开（定位）输出文件
+    /// 在文件管理器中打开（定位）输出文件
     #[arg(long)]
     open: bool,
 
@@ -152,7 +162,7 @@ struct UrlsArgs {
     #[arg(long)]
     print: bool,
 
-    /// 在 Finder 中打开（定位）输出文件
+    /// 在文件管理器中打开（定位）输出文件
     #[arg(long)]
     open: bool,
 
@@ -214,7 +224,7 @@ struct UpdateArgs {
     #[arg(long)]
     version: Option<String>,
 
-    /// 安装目录，默认 ~/.local/bin
+    /// 安装目录（macOS 默认 ~/.local/bin，Windows 默认 %LOCALAPPDATA%\Programs\wxemoticon）
     #[arg(long)]
     install_dir: Option<String>,
 
@@ -298,8 +308,18 @@ fn term_stderr() -> dialoguer::console::Term {
 }
 
 fn home_dir() -> anyhow::Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| anyhow!("无法获取 HOME 环境变量"))?;
-    Ok(PathBuf::from(home))
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("USERPROFILE")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow!("无法获取 USERPROFILE 环境变量"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow!("无法获取 HOME 环境变量"))
+    }
 }
 
 fn default_out_dir() -> anyhow::Result<PathBuf> {
@@ -308,7 +328,15 @@ fn default_out_dir() -> anyhow::Result<PathBuf> {
         return Ok(home_dir()?
             .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji"));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let base = match std::env::var("LOCALAPPDATA") {
+            Ok(value) => PathBuf::from(value),
+            Err(_) => home_dir()?.join("AppData/Local"),
+        };
+        return Ok(base.join("wxemoticon"));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(home_dir()?.join(".local/share/wxemoticon"))
     }
@@ -391,6 +419,11 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
         let explicit = explicit.map(resolve_user_path).transpose()?;
         linux::discover_data_root(&home_dir()?, explicit.as_deref())
     }
+    #[cfg(target_os = "windows")]
+    {
+        let explicit = explicit.map(resolve_user_path).transpose()?;
+        windows::discover_data_root(&home_dir()?, explicit.as_deref())
+    }
     #[cfg(target_os = "macos")]
     {
         if let Some(path) = explicit {
@@ -399,7 +432,7 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
         return Ok(home_dir()?
             .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"));
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = explicit;
         Err(anyhow!("当前操作系统不受支持"))
@@ -407,7 +440,42 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
 }
 
 fn downloads_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows 的"下载"文件夹可能被用户/OneDrive 重定向，优先取系统真实路径。
+        if let Some(dir) = shell_downloads_dir() {
+            return Ok(dir);
+        }
+    }
     Ok(home_dir()?.join("Downloads"))
+}
+
+#[cfg(target_os = "windows")]
+fn shell_downloads_dir() -> Option<PathBuf> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_Downloads};
+
+    unsafe {
+        let mut path_ptr: *mut u16 = std::ptr::null_mut();
+        let hr = SHGetKnownFolderPath(
+            &FOLDERID_Downloads,
+            0, // KF_FLAG_DEFAULT
+            std::ptr::null_mut(),
+            &mut path_ptr,
+        );
+        if hr != 0 || path_ptr.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *path_ptr.add(len) != 0 {
+            len += 1;
+        }
+        let wide = std::slice::from_raw_parts(path_ptr, len);
+        let path = String::from_utf16_lossy(wide);
+        windows_sys::Win32::System::Com::CoTaskMemFree(path_ptr as *const c_void);
+        let dir = PathBuf::from(path);
+        dir.is_dir().then_some(dir)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -453,6 +521,35 @@ fn open_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn open_reveal(path: &Path) -> anyhow::Result<()> {
+    // explorer 常在成功时也返回非零退出码，这里忽略退出码。
+    let _ = Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .status()
+        .context("执行 explorer 失败")?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_dir(path: &Path) -> anyhow::Result<()> {
+    let _ = Command::new("explorer.exe")
+        .arg(path)
+        .status()
+        .context("执行 explorer 失败")?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn open_reveal(_path: &Path) -> anyhow::Result<()> {
+    Err(anyhow!("当前操作系统不受支持"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn open_dir(_path: &Path) -> anyhow::Result<()> {
+    Err(anyhow!("当前操作系统不受支持"))
+}
+
 #[cfg(target_os = "macos")]
 fn wechat_is_running(wechat_app: &Path) -> bool {
     // Don't use `ps | grep` / `pgrep -f` because they may match themselves and cause false positives.
@@ -481,6 +578,7 @@ fn wechat_is_running(wechat_app: &Path) -> bool {
     false
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn prompt_enter_to_continue(no_interactive: bool, msg: &str) -> anyhow::Result<()> {
     eprintln!("{msg}");
     if no_interactive {
@@ -545,7 +643,9 @@ fn wait_for_wechat_exit(_wechat_app: &Path, no_interactive: bool) -> anyhow::Res
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[allow(dead_code)]
 fn wait_for_wechat_exit(_wechat_app: &Path, _no_interactive: bool) -> anyhow::Result<()> {
+    // Windows 抓 key 优先扫描正在运行的微信，无需先退出。
     Err(anyhow!("当前操作系统不受支持"))
 }
 
@@ -717,19 +817,19 @@ fn select_account(
     }
 
     eprintln!("检测到 {} 个账号，请选择：", accounts.len());
-    for (i, a) in accounts.iter().enumerate() {
-        eprintln!(
-            "  {}) {}（emoticon.db 更新：{}）",
-            i + 1,
-            a.wxid,
-            format_mtime(a.emoticon_db_mtime)
-        );
-    }
-
-    let items: Vec<&str> = accounts.iter().map(|a| a.wxid.as_str()).collect();
+    let labels: Vec<String> = accounts
+        .iter()
+        .map(|a| {
+            format!(
+                "{}（emoticon.db 更新：{}）",
+                a.wxid,
+                format_mtime(a.emoticon_db_mtime)
+            )
+        })
+        .collect();
     let idx = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("请输入序号")
-        .items(&items)
+        .items(&labels)
         .default(0)
         .interact_on(&term_stderr())
         .context("读取选择失败")?;
@@ -972,7 +1072,14 @@ fn get_or_dump_key(
         write_private_file(key_file, format!("{key}\n").as_bytes())?;
         Ok(key)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (target_wxid, no_interactive);
+        let key = windows::dump_db_key(wechat_app, emoticon_db, log_file, timeout)?;
+        write_private_file(key_file, format!("{key}\n").as_bytes())?;
+        Ok(key)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (
             target_wxid,
@@ -1011,21 +1118,182 @@ impl std::fmt::Display for DecryptError {
     }
 }
 
+/// 解密单页（4096 字节）的 SQLCipher 页面镜像。
+/// `page_no` 从 1 开始；第 1 页开头 16 字节是 salt，明文里对应 "SQLite format 3\0"。
+fn decrypt_page_image(
+    page: &[u8],
+    page_no: u32,
+    key: &[u8; 32],
+    mac_key: &[u8; 32],
+) -> Result<Vec<u8>, DecryptError> {
+    const IV_SIZE: usize = 16;
+    const HMAC_SHA512_SIZE: usize = 64;
+    const AES_BLOCK_SIZE: usize = 16;
+    const PAGE_SIZE: usize = 4096;
+    const SALT_SIZE: usize = 16;
+
+    if page.len() != PAGE_SIZE {
+        return Err(DecryptError::Invalid("invalid page size".to_string()));
+    }
+
+    // SQLCipher reserved bytes per page are IV + HMAC, aligned to AES block size.
+    let mut reserve = IV_SIZE + HMAC_SHA512_SIZE;
+    if !reserve.is_multiple_of(AES_BLOCK_SIZE) {
+        reserve = ((reserve / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE;
+    }
+
+    let offset = if page_no == 1 { SALT_SIZE } else { 0 };
+    let iv_start = PAGE_SIZE - reserve;
+    let iv_end = iv_start + IV_SIZE;
+    let hmac_start = iv_end;
+    let hmac_end = hmac_start + HMAC_SHA512_SIZE;
+
+    let mut mac = Hmac::<Sha512>::new_from_slice(mac_key)
+        .map_err(|e| DecryptError::Crypto(format!("hmac init: {e}")))?;
+    mac.update(&page[offset..iv_end]);
+    mac.update(&page_no.to_le_bytes());
+    let expected = mac.finalize().into_bytes();
+    if expected.as_slice() != &page[hmac_start..hmac_end] {
+        return Err(DecryptError::HmacMismatch);
+    }
+
+    let mut scratch = page[offset..iv_start].to_vec();
+    let decrypted_body = cbc::Decryptor::<Aes256>::new_from_slices(key, &page[iv_start..iv_end])
+        .map_err(|e| DecryptError::Crypto(format!("cipher init: {e}")))?
+        .decrypt_padded_mut::<NoPadding>(&mut scratch)
+        .map_err(|e| DecryptError::Crypto(format!("decrypt failed: {e}")))?;
+
+    let mut out = Vec::<u8>::with_capacity(PAGE_SIZE);
+    if page_no == 1 {
+        out.extend_from_slice(b"SQLite format 3");
+        out.push(0x00);
+    }
+    out.extend_from_slice(decrypted_body);
+    out.extend_from_slice(&page[iv_start..PAGE_SIZE]);
+    Ok(out)
+}
+
+/// 解析 WAL 文件，返回（已提交帧：页号 -> WAL 内数据偏移，最终数据库页数）。
+/// 只保留最后一次 commit 之前的帧；之后的未提交帧忽略。
+/// SQLite WAL 校验和（walChecksum 算法）：按 32 位字对累加，字节序由文件 magic 决定。
+fn wal_checksum(data: &[u8], mut s0: u32, mut s1: u32, big_endian: bool) -> (u32, u32) {
+    let read_u32 = |b: &[u8]| -> u32 {
+        if big_endian {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+    for pair in data.chunks_exact(8) {
+        s0 = s0.wrapping_add(read_u32(&pair[0..4])).wrapping_add(s1);
+        s1 = s1.wrapping_add(read_u32(&pair[4..8])).wrapping_add(s0);
+    }
+    (s0, s1)
+}
+
+/// 一次已提交事务：本事务写入的页（页号 + WAL 内数据偏移）与提交后的库页数。
+struct WalTransaction {
+    pages: Vec<(u32, usize)>,
+    db_size_after: u32,
+}
+
+/// 解析 WAL：校验头部与逐帧链式校验和，返回校验通过前缀内的已提交事务。
+/// 校验和链断裂处之后的帧视为未提交并丢弃（与 SQLite 自身恢复语义一致：
+/// 只重放有效前缀里的完整事务，不会出现"半个事务"被应用的情况）。
+fn collect_wal_transactions(wal: &[u8]) -> Option<Vec<WalTransaction>> {
+    const WAL_HEADER_SIZE: usize = 32;
+    const WAL_FRAME_HEADER_SIZE: usize = 24;
+    const PAGE_SIZE: usize = 4096;
+
+    if wal.len() < WAL_HEADER_SIZE {
+        return None;
+    }
+    let magic = u32::from_be_bytes(wal[0..4].try_into().ok()?);
+    let big_endian = match magic {
+        0x377F_0682 => false,
+        0x377F_0683 => true,
+        _ => return None,
+    };
+    let page_size = u32::from_be_bytes(wal[8..12].try_into().ok()?) as usize;
+    if page_size != PAGE_SIZE {
+        return None;
+    }
+    // 校验和存储字节序由 magic 决定（页号等字段恒为大端）。
+    let read_cksum = |b: &[u8]| -> u32 {
+        if big_endian {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+    // 头部校验和覆盖前 24 字节，初值 (0, 0)。
+    let stored_h0 = read_cksum(&wal[24..28]);
+    let stored_h1 = read_cksum(&wal[28..32]);
+    if wal_checksum(&wal[..24], 0, 0, big_endian) != (stored_h0, stored_h1) {
+        return None;
+    }
+    let header_salt = &wal[16..24];
+
+    let mut chain = (stored_h0, stored_h1);
+    let mut transactions: Vec<WalTransaction> = Vec::new();
+    let mut pending: Vec<(u32, usize)> = Vec::new();
+    let mut offset = WAL_HEADER_SIZE;
+    while offset + WAL_FRAME_HEADER_SIZE + PAGE_SIZE <= wal.len() {
+        let page_no = u32::from_be_bytes(wal[offset..offset + 4].try_into().ok()?);
+        let db_size_after = u32::from_be_bytes(wal[offset + 4..offset + 8].try_into().ok()?);
+        let frame_salt = &wal[offset + 8..offset + 16];
+        // salt 不匹配说明是 checkpoint 之后的旧帧，校验和链在此断裂。
+        if frame_salt != header_salt || page_no == 0 {
+            break;
+        }
+        // 帧校验和：帧头前 8 字节 + 页数据，链式承接上一帧（首帧承接头部）。
+        let stored_c0 = read_cksum(&wal[offset + 16..offset + 20]);
+        let stored_c1 = read_cksum(&wal[offset + 20..offset + 24]);
+        let (mid0, mid1) = wal_checksum(
+            &wal[offset..offset + 8],
+            chain.0,
+            chain.1,
+            big_endian,
+        );
+        let checksum = wal_checksum(
+            &wal[offset + WAL_FRAME_HEADER_SIZE..offset + WAL_FRAME_HEADER_SIZE + PAGE_SIZE],
+            mid0,
+            mid1,
+            big_endian,
+        );
+        if checksum != (stored_c0, stored_c1) {
+            break;
+        }
+        chain = (stored_c0, stored_c1);
+
+        pending.push((page_no, offset + WAL_FRAME_HEADER_SIZE));
+        if db_size_after != 0 {
+            transactions.push(WalTransaction {
+                pages: std::mem::take(&mut pending),
+                db_size_after,
+            });
+        }
+        offset += WAL_FRAME_HEADER_SIZE + PAGE_SIZE;
+    }
+
+    if transactions.is_empty() {
+        return None;
+    }
+    Some(transactions)
+}
+
 fn decrypt_db_file_v4_with_key(
     path: &Path,
     key_bytes: &[u8],
     treat_as_passphrase: bool,
 ) -> Result<Vec<u8>, DecryptError> {
-    const IV_SIZE: usize = 16;
-    const HMAC_SHA512_SIZE: usize = 64;
     const KEY_SIZE: usize = 32;
-    const AES_BLOCK_SIZE: usize = 16;
     const ROUND_COUNT: u32 = 256_000;
     const PAGE_SIZE: usize = 4096;
     const SALT_SIZE: usize = 16;
     const SQLITE_HEADER: &[u8] = b"SQLite format 3";
 
-    let mut buf = std::fs::read(path)?;
+    let buf = std::fs::read(path)?;
     if buf.starts_with(SQLITE_HEADER) {
         return Ok(buf);
     }
@@ -1051,54 +1319,68 @@ fn decrypt_db_file_v4_with_key(
     };
     let mac_key = pbkdf2_hmac_array::<Sha512, KEY_SIZE>(&key, &mac_salt, 2);
 
-    // SQLCipher reserved bytes per page are IV + HMAC, aligned to AES block size.
-    let mut reserve = IV_SIZE + HMAC_SHA512_SIZE;
-    if !reserve.is_multiple_of(AES_BLOCK_SIZE) {
-        reserve = ((reserve / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE;
-    }
-
     let total_pages = buf.len() / PAGE_SIZE;
-    let mut decrypted = Vec::<u8>::with_capacity(buf.len());
-
-    // Page 1 starts with the 16-byte SQLite header.
-    decrypted.extend_from_slice(SQLITE_HEADER);
-    decrypted.push(0x00);
-
-    type HmacSha512 = Hmac<Sha512>;
-    type Aes256CbcDec = cbc::Decryptor<Aes256>;
-
+    let mut pages: Vec<Vec<u8>> = Vec::with_capacity(total_pages);
     for cur_page in 0..total_pages {
-        let offset = if cur_page == 0 { SALT_SIZE } else { 0 };
-        let start = cur_page * PAGE_SIZE;
-        let end = start + PAGE_SIZE;
-
-        let iv_start = end - reserve;
-        let iv_end = iv_start + IV_SIZE;
-        let hmac_start = iv_start + IV_SIZE;
-        let hmac_end = hmac_start + HMAC_SHA512_SIZE;
-        if hmac_end > end {
-            return Err(DecryptError::Invalid(
-                "invalid db reserve region".to_string(),
-            ));
-        }
-
-        let mut mac = HmacSha512::new_from_slice(&mac_key)
-            .map_err(|e| DecryptError::Crypto(format!("hmac init: {e}")))?;
-        mac.update(&buf[start + offset..iv_start + IV_SIZE]);
-        mac.update(&((cur_page as u32) + 1).to_le_bytes());
-        let expected = mac.finalize().into_bytes();
-        if expected.as_slice() != &buf[hmac_start..hmac_end] {
-            return Err(DecryptError::HmacMismatch);
-        }
-
-        let iv = &buf[iv_start..iv_end];
-        let decrypted_page = Aes256CbcDec::new(&key.into(), iv.into())
-            .decrypt_padded_mut::<NoPadding>(&mut buf[start + offset..iv_start])
-            .map_err(|e| DecryptError::Crypto(format!("decrypt failed: {e}")))?;
-        decrypted.extend_from_slice(decrypted_page);
-        decrypted.extend_from_slice(&buf[iv_start..end]);
+        let plain = decrypt_page_image(
+            &buf[cur_page * PAGE_SIZE..(cur_page + 1) * PAGE_SIZE],
+            (cur_page as u32) + 1,
+            &key,
+            &mac_key,
+        )?;
+        pages.push(plain);
     }
 
+    // 微信运行时，最近的变更可能仍在 WAL 中；按事务合并，否则解密主库
+    // 会漏掉新增/更新的表情记录。每个事务的所有页全部解密成功才应用，
+    // 校验和通过却解密失败时明确报错——绝不返回新旧页面混合的数据库。
+    // （校验和链断裂处之后的帧已在解析阶段按未提交丢弃，见 collect_wal_transactions。）
+    let wal_path = {
+        let mut s = path.as_os_str().to_os_string();
+        s.push("-wal");
+        PathBuf::from(s)
+    };
+    if let Ok(wal) = std::fs::read(&wal_path) {
+        if let Some(transactions) = collect_wal_transactions(&wal) {
+            for tx in &transactions {
+                let target = tx.db_size_after as usize;
+                if pages.len() < target {
+                    pages.resize(target, vec![0u8; PAGE_SIZE]);
+                }
+                let mut decoded = Vec::with_capacity(tx.pages.len());
+                for (page_no, data_offset) in &tx.pages {
+                    let page_no = *page_no as usize;
+                    if page_no == 0 || page_no > target {
+                        return Err(DecryptError::Invalid(
+                            "wal transaction references page out of range".to_string(),
+                        ));
+                    }
+                    match decrypt_page_image(
+                        &wal[*data_offset..*data_offset + PAGE_SIZE],
+                        page_no as u32,
+                        &key,
+                        &mac_key,
+                    ) {
+                        Ok(plain) => decoded.push((page_no, plain)),
+                        Err(_) => {
+                            return Err(DecryptError::Invalid(
+                                "wal frame failed page integrity check".to_string(),
+                            ))
+                        }
+                    }
+                }
+                for (page_no, plain) in decoded {
+                    pages[page_no - 1] = plain;
+                }
+                pages.truncate(target);
+            }
+        }
+    }
+
+    let mut decrypted = Vec::<u8>::with_capacity(pages.len() * PAGE_SIZE);
+    for page in pages {
+        decrypted.extend_from_slice(&page);
+    }
     Ok(decrypted)
 }
 
@@ -1344,7 +1626,7 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
         seed_key_file_from_legacy(&key_file);
     }
 
-    let wechat_app = resolve_user_path(&cli.wechat_app)?;
+    let wechat_app = resolve_wechat_app(&cli.wechat_app)?;
 
     let key = get_or_dump_key(
         &account.wxid,
@@ -1378,9 +1660,6 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
     }
 
     if args.open {
-        #[cfg(target_os = "macos")]
-        open_reveal(&key_file)?;
-        #[cfg(target_os = "linux")]
         open_reveal(&key_file)?;
     }
     Ok(())
@@ -1448,7 +1727,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&log_file);
     let _ = std::fs::write(&log_file, "");
 
-    let wechat_app = resolve_user_path(&cli.wechat_app)?;
+    let wechat_app = resolve_wechat_app(&cli.wechat_app)?;
 
     let mut db_key = get_or_dump_key(
         &account.wxid,
@@ -1545,9 +1824,6 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     }
 
     if args.open {
-        #[cfg(target_os = "macos")]
-        open_reveal(&out_file)?;
-        #[cfg(target_os = "linux")]
         open_reveal(&out_file)?;
     }
     Ok(())
@@ -1583,7 +1859,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         let urls_log = urls_log_for_wxid(&account.wxid)?;
         let key_file = key_file_for_wxid(&account.wxid)?;
         let key_log = key_log_for_wxid(&account.wxid)?;
-        let wechat_app = resolve_user_path(&cli.wechat_app)?;
+        let wechat_app = resolve_wechat_app(&cli.wechat_app)?;
 
         ensure_private_default_out_dir()?;
         let _ = std::fs::remove_file(&urls_file);
@@ -1827,9 +2103,6 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
     }
 
     if args.open {
-        #[cfg(target_os = "macos")]
-        open_dir(&out_dir)?;
-        #[cfg(target_os = "linux")]
         open_dir(&out_dir)?;
     }
 
@@ -1838,10 +2111,10 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
 
 #[allow(unreachable_code)]
 async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = args;
-        return Err(anyhow!("`wxemoticon update` 目前仅支持 macOS"));
+        return Err(anyhow!("`wxemoticon update` 目前仅支持 macOS / Windows"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1912,6 +2185,82 @@ async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
             .args(["-lc", &cmdline])
             .status()
             .context("执行更新命令失败")?;
+
+        if !status.success() {
+            return Err(anyhow!("更新失败（退出码：{}）", status));
+        }
+
+        if args.json {
+            let out = UpdateResult {
+                version,
+                install_dir: install_dir.display().to_string(),
+                repo: args.repo.trim().to_string(),
+                installer_url,
+            };
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("更新完成。请运行 `wxemoticon --version` 验证版本。");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let install_dir = if let Some(v) = &args.install_dir {
+            resolve_user_path(v)?
+        } else {
+            let base = match std::env::var("LOCALAPPDATA") {
+                Ok(value) => PathBuf::from(value),
+                Err(_) => home_dir()?.join("AppData/Local"),
+            };
+            base.join("Programs/wxemoticon")
+        };
+
+        let version = args
+            .version
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "latest".to_string());
+
+        // 可用 WXEMOTICON_INSTALLER_URL 覆盖安装脚本地址（镜像/测试用）。
+        let installer_url = std::env::var("WXEMOTICON_INSTALLER_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.cmd",
+                    args.repo.trim()
+                )
+            });
+        if !args.json {
+            eprintln!("开始更新 wxemoticon（version: {version}）...");
+        }
+
+        // 直接用 Rust 调 curl 与 cmd 分步执行，避免 cmd /C 嵌套引号
+        // 的剥离规则把脚本路径里的引号吃掉。
+        let script_path = std::env::temp_dir().join("wxemoticon-install.cmd");
+        let status = Command::new("curl")
+            .arg("-fsSL")
+            .arg(&installer_url)
+            .arg("-o")
+            .arg(&script_path)
+            .status()
+            .context("执行 curl 下载安装脚本失败")?;
+        if !status.success() {
+            return Err(anyhow!("下载安装脚本失败（退出码：{status}）"));
+        }
+
+        let mut command = Command::new("cmd");
+        command
+            .arg("/C")
+            .arg(&script_path)
+            .env("WXEMOTICON_REPO", args.repo.trim())
+            .env("INSTALL_DIR", install_dir.display().to_string());
+        if version != "latest" {
+            command.env("WXEMOTICON_VERSION", &version);
+        }
+        let status = command.status().context("执行更新命令失败")?;
 
         if !status.success() {
             return Err(anyhow!("更新失败（退出码：{}）", status));
@@ -2015,6 +2364,276 @@ mod cli_tests {
         );
     }
 
+    // ======== WAL 回归测试（真实链式校验和 + 真实加密页）========
+
+    /// 与解密侧一致的 mac_key 派生（PBKDF2(key, salt^0x3a, 2)）。
+    fn fixture_mac_key(key: &[u8; 32], salt: &[u8; 16]) -> [u8; 32] {
+        let mac_salt: Vec<u8> = salt.iter().map(|b| b ^ 0x3a).collect();
+        pbkdf2_hmac_array::<Sha512, 32>(key, &mac_salt, 2)
+    }
+
+    /// 构造 SQLCipher 格式的加密页；正文首字节为 seed 标记，用于断言解密结果。
+    fn encrypted_fixture_page(
+        page_no: u32,
+        key: &[u8; 32],
+        mac_key: &[u8; 32],
+        salt: &[u8; 16],
+        seed: u8,
+    ) -> Vec<u8> {
+        use cbc::cipher::BlockEncryptMut;
+        let mut page = vec![0u8; 4096];
+        let offset = if page_no == 1 { 16 } else { 0 };
+        if page_no == 1 {
+            page[..16].copy_from_slice(salt);
+        }
+        for (i, b) in page[offset..4016].iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        let iv = [seed; 16];
+        page[4016..4032].copy_from_slice(&iv);
+        let encrypted = {
+            let region = &mut page[offset..4016];
+            cbc::Encryptor::<Aes256>::new_from_slices(key, &iv)
+                .unwrap()
+                .encrypt_padded_mut::<NoPadding>(region, 4016 - offset)
+                .unwrap()
+                .to_vec()
+        };
+        page[offset..4016].copy_from_slice(&encrypted);
+        let mut mac = Hmac::<Sha512>::new_from_slice(mac_key).unwrap();
+        mac.update(&page[offset..4032]);
+        mac.update(&page_no.to_le_bytes());
+        page[4032..].copy_from_slice(&mac.finalize().into_bytes());
+        page
+    }
+
+    /// 逐帧构造带真实链式校验和的 WAL（magic 0x377F0682，小端校验和）。
+    /// frames 元素：(页号, 页数据, db_size_after（0=非提交帧）, salt)
+    fn build_checked_wal(frames: &[(u32, Vec<u8>, u32, [u8; 8])]) -> Vec<u8> {
+        let mut wal = Vec::new();
+        wal.extend_from_slice(&0x377F_0682u32.to_be_bytes());
+        wal.extend_from_slice(&3_007_000u32.to_be_bytes());
+        wal.extend_from_slice(&4096u32.to_be_bytes());
+        wal.extend_from_slice(&0u32.to_be_bytes());
+        wal.extend_from_slice(&[1u8; 8]);
+        let (h0, h1) = wal_checksum(&wal[..24], 0, 0, false);
+        wal.extend_from_slice(&h0.to_le_bytes());
+        wal.extend_from_slice(&h1.to_le_bytes());
+        let mut chain = (h0, h1);
+        for (page_no, page, db_size_after, salt) in frames {
+            let mut header = [0u8; 24];
+            header[0..4].copy_from_slice(&page_no.to_be_bytes());
+            header[4..8].copy_from_slice(&db_size_after.to_be_bytes());
+            header[8..16].copy_from_slice(salt);
+            let (a0, a1) = wal_checksum(&header[..8], chain.0, chain.1, false);
+            let (c0, c1) = wal_checksum(&page[..4096], a0, a1, false);
+            header[16..20].copy_from_slice(&c0.to_le_bytes());
+            header[20..24].copy_from_slice(&c1.to_le_bytes());
+            wal.extend_from_slice(&header);
+            wal.extend_from_slice(page);
+            chain = (c0, c1);
+        }
+        wal
+    }
+
+    #[test]
+    fn wal_parser_groups_frames_into_transactions() {
+        let wal = build_checked_wal(&[
+            (2, vec![0xAA; 4096], 0, [1u8; 8]),
+            (3, vec![0xBB; 4096], 5, [1u8; 8]), // 提交：事务含 2、3 两页
+            (4, vec![0xCC; 4096], 0, [1u8; 8]), // 未提交帧不进入任何事务
+        ]);
+        let txs = collect_wal_transactions(&wal).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].db_size_after, 5);
+        let pages: Vec<u32> = txs[0].pages.iter().map(|(n, _)| *n).collect();
+        assert_eq!(pages, vec![2, 3]);
+    }
+
+    #[test]
+    fn wal_parser_applies_only_checksum_valid_prefix() {
+        let mut wal = build_checked_wal(&[
+            (2, vec![0x55; 4096], 4, [1u8; 8]),
+            (3, vec![0x66; 4096], 5, [1u8; 8]),
+        ]);
+        // 破坏第二个事务首帧的页数据 → 校验和链断裂，第二个事务整体作废。
+        let second_page_off = 32 + (24 + 4096) + 24;
+        wal[second_page_off + 100] ^= 1;
+        let txs = collect_wal_transactions(&wal).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].db_size_after, 4);
+        let pages: Vec<u32> = txs[0].pages.iter().map(|(n, _)| *n).collect();
+        assert_eq!(pages, vec![2]);
+    }
+
+    #[test]
+    fn wal_parser_rejects_bad_header_and_stale_salt() {
+        assert!(collect_wal_transactions(&[]).is_none());
+        assert!(collect_wal_transactions(&[0u8; 32]).is_none());
+
+        // 头部校验和被破坏。
+        let mut wal = build_checked_wal(&[(2, vec![0xAA; 4096], 3, [1u8; 8])]);
+        wal[25] ^= 1;
+        assert!(collect_wal_transactions(&wal).is_none());
+
+        // salt 不匹配的旧帧：校验和链在第一帧即断。
+        let wal = build_checked_wal(&[(2, vec![0xAA; 4096], 3, [9u8; 8])]);
+        assert!(collect_wal_transactions(&wal).is_none());
+
+        // 只有未提交帧。
+        let wal = build_checked_wal(&[(2, vec![0xAA; 4096], 0, [1u8; 8])]);
+        assert!(collect_wal_transactions(&wal).is_none());
+    }
+
+    #[test]
+    fn wal_corrupted_frame_keeps_whole_transaction_out() {
+        // 审查复现用例：同一事务更新两页，损坏第二页后，结果必须是
+        // “两页都保持旧值”，而不是“第一页新、第二页旧”的混合状态。
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("emoticon.db");
+        let key = [0x42u8; 32];
+        let salt = [0x11u8; 16];
+        let mac_key = fixture_mac_key(&key, &salt);
+        let p1 = encrypted_fixture_page(1, &key, &mac_key, &salt, 0x10);
+        let p2_old = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x20);
+        let p3_old = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x30);
+        let p2_new = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x21);
+        let p3_new = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x31);
+        std::fs::write(&db, [p1, p2_old, p3_old].concat()).unwrap();
+
+        let mut wal = build_checked_wal(&[
+            (2, p2_new, 0, [1u8; 8]),
+            (3, p3_new, 3, [1u8; 8]),
+        ]);
+        // 损坏第二帧的页数据（帧校验和随之失效，事务不再被视为已提交）。
+        let second_page_off = 32 + (24 + 4096) + 24;
+        wal[second_page_off + 50] ^= 1;
+        std::fs::write(db.with_file_name("emoticon.db-wal"), &wal).unwrap();
+
+        let out = decrypt_db_file_v4_with_key(&db, &key, false).unwrap();
+        assert_eq!(out.len(), 3 * 4096);
+        // 第 2、3 页都保持旧值（seed 标记 0x20 / 0x30）。
+        assert_eq!(out[4096], 0x20);
+        assert_eq!(out[2 * 4096], 0x30);
+    }
+
+    #[test]
+    fn wal_transactions_apply_in_order_and_later_wins() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("emoticon.db");
+        let key = [0x42u8; 32];
+        let salt = [0x11u8; 16];
+        let mac_key = fixture_mac_key(&key, &salt);
+        let p1 = encrypted_fixture_page(1, &key, &mac_key, &salt, 0x10);
+        let p2_old = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x20);
+        let p3_old = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x30);
+        let p2_v1 = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x21);
+        let p2_v2 = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x22);
+        let p3_new = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x31);
+        std::fs::write(&db, [p1, p2_old, p3_old].concat()).unwrap();
+
+        // 事务一：写第 2 页并提交；事务二：再写第 2 页 + 第 3 页并提交。
+        let wal = build_checked_wal(&[
+            (2, p2_v1, 3, [1u8; 8]),
+            (2, p2_v2, 0, [1u8; 8]),
+            (3, p3_new, 3, [1u8; 8]),
+        ]);
+        std::fs::write(db.with_file_name("emoticon.db-wal"), &wal).unwrap();
+
+        let out = decrypt_db_file_v4_with_key(&db, &key, false).unwrap();
+        assert_eq!(out.len(), 3 * 4096);
+        // 后提交的事务覆盖先提交的事务；未涉及页保持旧值。
+        assert_eq!(out[4096], 0x22);
+        assert_eq!(out[2 * 4096], 0x31);
+    }
+
+    #[test]
+    fn wal_valid_checksum_but_bad_hmac_fails_explicitly() {
+        // 校验和自洽、但页内容用另一把密钥构造：必须明确报错，
+        // 而不是静默跳过该页造成同一事务新旧混合。
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("emoticon.db");
+        let key = [0x42u8; 32];
+        let wrong_key = [0x43u8; 32];
+        let salt = [0x11u8; 16];
+        let mac_key = fixture_mac_key(&key, &salt);
+        let wrong_mac_key = fixture_mac_key(&wrong_key, &salt);
+        let p1 = encrypted_fixture_page(1, &key, &mac_key, &salt, 0x10);
+        let p2_old = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x20);
+        let p3_old = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x30);
+        let p2_foreign = encrypted_fixture_page(2, &wrong_key, &wrong_mac_key, &salt, 0x21);
+        std::fs::write(&db, [p1, p2_old, p3_old].concat()).unwrap();
+
+        let wal = build_checked_wal(&[(2, p2_foreign, 3, [1u8; 8])]);
+        std::fs::write(db.with_file_name("emoticon.db-wal"), &wal).unwrap();
+
+        let result = decrypt_db_file_v4_with_key(&db, &key, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn page_decryption_round_trips_an_encrypted_page() {
+        use cbc::cipher::BlockEncryptMut;
+
+        const PAGE_SIZE: usize = 4096;
+        const SALT_SIZE: usize = 16;
+        const IV_SIZE: usize = 16;
+        const HMAC_SIZE: usize = 64;
+        const RESERVED: usize = IV_SIZE + HMAC_SIZE;
+
+        let key = [0x55u8; 32];
+        let mut page = [0u8; PAGE_SIZE];
+        for (index, byte) in page[SALT_SIZE..PAGE_SIZE - RESERVED].iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let original_body = page[SALT_SIZE..PAGE_SIZE - RESERVED].to_vec();
+
+        let salt = page[..SALT_SIZE].to_vec();
+        let mac_salt: Vec<u8> = salt.iter().map(|byte| byte ^ 0x3a).collect();
+        let mac_key = pbkdf2_hmac_array::<Sha512, 32>(&key, &mac_salt, 2);
+
+        let iv = [7u8; IV_SIZE];
+        let iv_start = PAGE_SIZE - RESERVED;
+        let iv_end = iv_start + IV_SIZE;
+        let body_len = page[SALT_SIZE..iv_start].len();
+        cbc::Encryptor::<Aes256>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_mut::<NoPadding>(&mut page[SALT_SIZE..iv_start], body_len)
+            .unwrap();
+        page[iv_start..iv_end].copy_from_slice(&iv);
+
+        let mut mac = Hmac::<Sha512>::new_from_slice(&mac_key).unwrap();
+        mac.update(&page[SALT_SIZE..iv_end]);
+        mac.update(&1u32.to_le_bytes());
+        page[iv_end..].copy_from_slice(&mac.finalize().into_bytes());
+
+        let plain = decrypt_page_image(&page, 1, &key, &mac_key).unwrap();
+        assert_eq!(&plain[..16], b"SQLite format 3\0");
+        assert_eq!(plain[16..iv_start], original_body[..]);
+        assert_eq!(plain[iv_start..], page[iv_start..]);
+
+        // 篡改任意密文字节应导致校验失败。
+        let mut tampered = page;
+        tampered[100] ^= 1;
+        assert!(decrypt_page_image(&tampered, 1, &key, &mac_key).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_downloads_dir_follows_shell_redirection() {
+        // 重定向存在时（如 OneDrive），必须返回系统真实"下载"目录且真实存在。
+        if let Some(dir) = shell_downloads_dir() {
+            assert!(dir.is_dir(), "shell 下载目录应存在：{}", dir.display());
+            assert_eq!(downloads_dir().unwrap(), dir);
+        } else {
+            // 无重定向时退回 ~/Downloads。
+            assert_eq!(
+                downloads_dir().unwrap(),
+                home_dir().unwrap().join("Downloads")
+            );
+        }
+    }
+
     #[test]
     fn download_candidates_fall_back_to_the_tls_valid_wechat_cdn_host() {
         let source = "https://vweixinf.tc.qq.com/110/20401/stodownload.webp?m=abc&hy=SZ";
@@ -2025,6 +2644,23 @@ mod cli_tests {
         assert!(candidates.contains(
             &"https://wxapp.tc.qq.com/110/20401/stodownload.webp?m=abc&hy=SZ".to_string()
         ));
+    }
+}
+
+fn resolve_wechat_app(input: &str) -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let resolved = resolve_user_path(input)?;
+        if resolved.as_os_str().is_empty() {
+            // 检测不到也不在此报错：微信正在运行时用不到程序路径，
+            // 推迟到真正需要拉起临时实例时才校验（见 windows::dump_db_key）。
+            return Ok(windows::discover_wechat_bin().unwrap_or_default());
+        }
+        return Ok(resolved);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        resolve_user_path(input)
     }
 }
 

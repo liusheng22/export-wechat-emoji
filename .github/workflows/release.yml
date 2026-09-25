@@ -6,6 +6,13 @@ on:
     tags:
       - 'v*' # 监听所有以 v 开头的 tag（如 v0.1.2）
 
+# 同一 tag 重推（强推重发版）时取消旧的运行，避免并发写同一个 release；
+# 资产更新靠各上传步骤的 gh release upload --clobber 同名替换完成，
+# 不删除 release 本身，构建失败时已有资产仍可下载。
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   publish-tauri:
     permissions:
@@ -63,38 +70,55 @@ jobs:
           pnpm store prune
           pnpm install --no-frozen-lockfile
 
+      # tauri-action 只负责构建（不传 tagName 等发布参数，它不会创建/更新
+      # release，也就不会上传默认命名资产——那正是重发布时 already_exists
+      # 422 的来源）。release 的创建/更新统一用 gh，资产一律 --clobber 按名替换。
+      - name: ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          cat > /tmp/release-notes.md <<'NOTES'
+          本版本同时发布 App 与 CLI：
+
+          - macOS App（Apple Silicon）：wxemoticon-app-macos-arm64.dmg
+          - macOS App（Intel）：wxemoticon-app-macos-x64.dmg
+          - CLI：wxemoticon（aarch64 / x86_64）
+          - Windows CLI：wxemoticon-x86_64-windows.zip
+          - 安装脚本：install-wxemoticon.sh / install-wxemoticon.cmd
+
+          CLI 安装（macOS / Linux）：
+          curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
+
+          CLI 安装（Windows，cmd）：
+          curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.cmd -o "%TEMP%\install-wxemoticon.cmd" && "%TEMP%\install-wxemoticon.cmd"
+
+          CLI 常用命令：
+          - wxemoticon key
+          - wxemoticon urls
+          - wxemoticon export
+          - wxemoticon update
+
+          Homebrew（可选，仅 macOS）：
+          - brew tap liusheng22/wxemoticon
+          - brew install wxemoticon
+          NOTES
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG" \
+              --title "导出微信表情包 + wxemoticon ${TAG#v}" \
+              --notes-file /tmp/release-notes.md
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }} # 密钥，需要提前配置在 Github Secrets中
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }} # 生成时填入的密码，没有则不填
 
         with:
-          tagName: v__VERSION__ # tag的名称: v__VERSION__是指版本号
-          releaseName: 导出微信表情包 + wxemoticon v__VERSION__
           args: --target ${{ matrix.tauri_target }}
-          releaseBody: |
-            本版本同时发布 App 与 CLI：
-
-            - macOS App（Apple Silicon）：wxemoticon-app-macos-arm64.dmg
-            - macOS App（Intel）：wxemoticon-app-macos-x64.dmg
-            - CLI：wxemoticon（aarch64 / x86_64）
-            - 安装脚本：install-wxemoticon.sh
-
-            CLI 安装：
-            curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
-
-            CLI 常用命令：
-            - wxemoticon key
-            - wxemoticon urls
-            - wxemoticon export
-            - wxemoticon update
-
-            Homebrew（可选）：
-            - brew tap liusheng22/wxemoticon
-            - brew install wxemoticon
-          releaseDraft: false
-          prerelease: false
 
       - name: add macOS repair helper to DMG
         run: |
@@ -115,7 +139,6 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
           BUNDLE_DIR="src-tauri/target/${{ matrix.tauri_target }}/release/bundle"
 
           DMG_SRC="$(ls -1 "${BUNDLE_DIR}"/dmg/*.dmg | head -n 1)"
@@ -129,16 +152,6 @@ jobs:
 
           gh release upload "$TAG" "$DMG_DST" "$APP_DST" --clobber
 
-          DEFAULT_DMG="_${VERSION}_${{ matrix.tauri_arch }}.dmg"
-          DEFAULT_APP="_${{ matrix.tauri_arch }}.app.tar.gz"
-
-          for NAME in "$DEFAULT_DMG" "$DEFAULT_APP"; do
-            ASSET_ID="$(gh release view "$TAG" --json assets --jq ".assets[] | select(.name==\"$NAME\") | .id" || true)"
-            if [[ -n "${ASSET_ID}" ]]; then
-              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" || true
-            fi
-          done
-
       - name: build wxemoticon cli (arm64 + x86_64)
         if: matrix.build_cli
         run: |
@@ -148,19 +161,21 @@ jobs:
           cargo build --manifest-path cli/Cargo.toml --release --target x86_64-apple-darwin
           tar -czf wxemoticon-aarch64-apple-darwin.tar.gz -C cli/target/release wxemoticon
           tar -czf wxemoticon-x86_64-apple-darwin.tar.gz -C cli/target/x86_64-apple-darwin/release wxemoticon
-          shasum -a 256 wxemoticon-*.tar.gz > wxemoticon-SHA256SUMS.txt
+          shasum -a 256 wxemoticon-*.tar.gz > wxemoticon-SHA256SUMS-macos.txt
 
       - name: upload wxemoticon cli assets
         if: matrix.build_cli
-        uses: softprops/action-gh-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: |
-            wxemoticon-aarch64-apple-darwin.tar.gz
-            wxemoticon-x86_64-apple-darwin.tar.gz
-            wxemoticon-SHA256SUMS.txt
-            scripts/install-wxemoticon.sh
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" \
+            wxemoticon-aarch64-apple-darwin.tar.gz \
+            wxemoticon-x86_64-apple-darwin.tar.gz \
+            wxemoticon-SHA256SUMS-macos.txt \
+            scripts/install-wxemoticon.sh \
+            --clobber
 
       - name: publish Homebrew formula to tap repo
         if: matrix.build_cli
@@ -177,11 +192,11 @@ jobs:
 
           TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"
-          ARM_SHA="$(awk '/wxemoticon-aarch64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS.txt)"
-          X64_SHA="$(awk '/wxemoticon-x86_64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS.txt)"
+          ARM_SHA="$(awk '/wxemoticon-aarch64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS-macos.txt)"
+          X64_SHA="$(awk '/wxemoticon-x86_64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS-macos.txt)"
 
           if [[ -z "${ARM_SHA}" || -z "${X64_SHA}" ]]; then
-            echo "failed to parse CLI checksums from wxemoticon-SHA256SUMS.txt" >&2
+            echo "failed to parse CLI checksums from wxemoticon-SHA256SUMS-macos.txt" >&2
             exit 1
           fi
 
@@ -205,43 +220,40 @@ jobs:
           git commit -m "wxemoticon ${TAG}"
           git push origin HEAD
 
-  cleanup-release-default-assets:
+  publish-cli-windows:
     needs: publish-tauri
-    runs-on: ubuntu-latest
     permissions:
       contents: write
+    runs-on: windows-latest
     steps:
-      - name: remove tauri default-named app assets
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整的 git 历史，包括 tag 信息
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # 静态链接 CRT：产物不依赖 VC++ 运行库
+      - name: build wxemoticon cli (static crt)
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --manifest-path cli/Cargo.toml --release --target x86_64-pc-windows-msvc
+
+      - name: package cli assets
+        shell: pwsh
         run: |
-          set -euo pipefail
-          REPO="${GITHUB_REPOSITORY}"
+          Compress-Archive -Path cli/target/x86_64-pc-windows-msvc/release/wxemoticon.exe -DestinationPath wxemoticon-x86_64-windows.zip -Force
+          $hash = (Get-FileHash wxemoticon-x86_64-windows.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  wxemoticon-x86_64-windows.zip" | Out-File -Encoding ascii wxemoticon-SHA256SUMS-windows.txt
+
+      - name: upload wxemoticon windows cli assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           TAG="${GITHUB_REF_NAME}"
-          API="https://api.github.com/repos/${REPO}/releases/tags/${TAG}"
-
-          JSON="$(curl -fsSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${API}")"
-
-          ASSETS="$(echo "${JSON}" | jq -r '
-            .assets[]
-            | select((.name | startswith("_")) and ((.name | endswith(".dmg")) or (.name | endswith(".app.tar.gz"))))
-            | [.id, .name]
-            | @tsv
-          ')"
-
-          if [[ -z "${ASSETS}" ]]; then
-            echo "No tauri default-named app assets to clean."
-            exit 0
-          fi
-
-          while IFS=$'\t' read -r ID NAME; do
-            [[ -z "${ID}" ]] && continue
-            echo "Deleting asset: ${NAME} (id=${ID})"
-            curl -fsSL -X DELETE \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${REPO}/releases/assets/${ID}" >/dev/null
-          done <<< "${ASSETS}"
+          gh release upload "$TAG" \
+            wxemoticon-x86_64-windows.zip \
+            wxemoticon-SHA256SUMS-windows.txt \
+            scripts/install-wxemoticon.cmd \
+            --clobber

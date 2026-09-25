@@ -1,9 +1,9 @@
 [package]
 name = "wxemoticon"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
-description = "macOS/Linux 微信表情包工具：抓取 db key / 导出 URL / 导出表情包图片"
+description = "微信表情包工具（macOS/Linux/Windows）：抓取 db key / 导出 URL / 导出表情包图片"
 
 [dependencies]
 anyhow = "1"
@@ -26,3 +26,15 @@ tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }

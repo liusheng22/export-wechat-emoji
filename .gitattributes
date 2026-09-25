@@ -1,0 +1,3 @@
+# batch 脚本必须保持 CRLF（LF 下 goto 标签解析有隐患）
+*.cmd text eol=crlf
+*.bat text eol=crlf

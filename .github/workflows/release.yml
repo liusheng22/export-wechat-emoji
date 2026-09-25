@@ -233,6 +233,10 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: test wxemoticon cli
+        shell: bash
+        run: cargo test --locked --manifest-path cli/Cargo.toml
+
       # 静态链接 CRT：产物不依赖 VC++ 运行库
       - name: build wxemoticon cli (static crt)
         shell: bash
@@ -248,9 +252,11 @@ jobs:
           "$hash  wxemoticon-x86_64-windows.zip" | Out-File -Encoding ascii wxemoticon-SHA256SUMS-windows.txt
 
       - name: upload wxemoticon windows cli assets
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           gh release upload "$TAG" \
             wxemoticon-x86_64-windows.zip \

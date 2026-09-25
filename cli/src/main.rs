@@ -1218,14 +1218,8 @@ fn collect_wal_transactions(wal: &[u8]) -> Option<Vec<WalTransaction>> {
     if page_size != PAGE_SIZE {
         return None;
     }
-    // 校验和存储字节序由 magic 决定（页号等字段恒为大端）。
-    let read_cksum = |b: &[u8]| -> u32 {
-        if big_endian {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        }
-    };
+    // WAL 校验和值始终按大端存储；magic 只决定计算时输入字的字节序。
+    let read_cksum = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
     // 头部校验和覆盖前 24 字节，初值 (0, 0)。
     let stored_h0 = read_cksum(&wal[24..28]);
     let stored_h1 = read_cksum(&wal[28..32]);
@@ -2407,7 +2401,7 @@ mod cli_tests {
         page
     }
 
-    /// 逐帧构造带真实链式校验和的 WAL（magic 0x377F0682，小端校验和）。
+    /// 逐帧构造带真实链式校验和的 WAL（小端计算，大端存储校验和）。
     /// frames 元素：(页号, 页数据, db_size_after（0=非提交帧）, salt)
     fn build_checked_wal(frames: &[(u32, Vec<u8>, u32, [u8; 8])]) -> Vec<u8> {
         let mut wal = Vec::new();
@@ -2417,8 +2411,8 @@ mod cli_tests {
         wal.extend_from_slice(&0u32.to_be_bytes());
         wal.extend_from_slice(&[1u8; 8]);
         let (h0, h1) = wal_checksum(&wal[..24], 0, 0, false);
-        wal.extend_from_slice(&h0.to_le_bytes());
-        wal.extend_from_slice(&h1.to_le_bytes());
+        wal.extend_from_slice(&h0.to_be_bytes());
+        wal.extend_from_slice(&h1.to_be_bytes());
         let mut chain = (h0, h1);
         for (page_no, page, db_size_after, salt) in frames {
             let mut header = [0u8; 24];
@@ -2427,13 +2421,51 @@ mod cli_tests {
             header[8..16].copy_from_slice(salt);
             let (a0, a1) = wal_checksum(&header[..8], chain.0, chain.1, false);
             let (c0, c1) = wal_checksum(&page[..4096], a0, a1, false);
-            header[16..20].copy_from_slice(&c0.to_le_bytes());
-            header[20..24].copy_from_slice(&c1.to_le_bytes());
+            header[16..20].copy_from_slice(&c0.to_be_bytes());
+            header[20..24].copy_from_slice(&c1.to_be_bytes());
             wal.extend_from_slice(&header);
             wal.extend_from_slice(page);
             chain = (c0, c1);
         }
         wal
+    }
+
+    #[test]
+    fn wal_parser_accepts_sqlite_generated_transactions() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("fixture.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "PRAGMA page_size=4096;
+             PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE fixture(value INTEGER);
+             INSERT INTO fixture VALUES (1), (2);",
+        )
+        .unwrap();
+
+        // Keep the connection open so SQLite does not checkpoint and remove the WAL.
+        let wal = std::fs::read(dir.path().join("fixture.db-wal")).unwrap();
+        let txs = collect_wal_transactions(&wal).expect("SQLite-generated WAL must be valid");
+        assert_eq!(txs.len(), 2);
+        assert_eq!(txs[1].db_size_after, 2);
+        assert!(txs[1].pages.iter().any(|(page_no, _)| *page_no == 2));
+
+        let mut snapshot = std::fs::read(&db).unwrap();
+        for tx in txs {
+            snapshot.resize(tx.db_size_after as usize * 4096, 0);
+            for (page_no, offset) in tx.pages {
+                let start = (page_no as usize - 1) * 4096;
+                snapshot[start..start + 4096].copy_from_slice(&wal[offset..offset + 4096]);
+            }
+        }
+        let snapshot_path = dir.path().join("snapshot.db");
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        let snapshot_conn = Connection::open(snapshot_path).unwrap();
+        let count: i64 = snapshot_conn
+            .query_row("SELECT COUNT(*) FROM fixture", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]
